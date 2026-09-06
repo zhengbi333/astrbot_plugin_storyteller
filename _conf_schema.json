@@ -1,0 +1,1092 @@
+{
+  "general": {
+    "description": "基础",
+    "type": "object",
+    "hint": "陪伴插件的通用配置；所有选项修改即自动保存。",
+    "items": {
+      "enabled": {
+        "description": "插件总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后插件不再参与对话，但 WebUI 面板仍可正常查看与设置。"
+      },
+      "timeout_reply": {
+        "description": "调用超时后的回复",
+        "type": "string",
+        "default": "",
+        "hint": "插件自调的媒体/接管等调用超时失败时，Bot 回一条「报错」说明。留空 = 静默（不打扰，也不把机制暴露给用户）；填了则超时失败时发送这段话（如「抱歉，我刚刚卡了一下，能再说一遍吗」）。此消息直发，不会写入 AstrBot 会话历史，也不会被记忆插件捕获——它是 Bot 的「报错」，不是对话。"
+      },
+      "page_animation": {
+        "description": "界面动画",
+        "type": "bool",
+        "default": true,
+        "hint": "选项卡切换动画的总开关。"
+      },
+      "animation_type": {
+        "description": "动画类型",
+        "type": "string",
+        "default": "rise",
+        "options": [
+          "fade",
+          "rise",
+          "zoom",
+          "slide",
+          "none"
+        ],
+        "hint": "fade 淡入 / rise 上浮 / zoom 缩放 / slide 滑入 / none 无动画。"
+      },
+      "animation_duration": {
+        "description": "动画时长（毫秒）",
+        "type": "int",
+        "default": 300,
+        "hint": "界面动画时长，100–1200 毫秒，数值越大越慢。"
+      },
+      "log_poll_interval": {
+        "description": "日志面板刷新间隔（秒）",
+        "type": "int",
+        "default": 1,
+        "min": 1,
+        "hint": "各模块日志展示面板的实时刷新间隔，1 秒为最实时；数字越大刷新越慢、请求越少。"
+      }
+    }
+  },
+  "intercept": {
+    "description": "拦截与改换",
+    "type": "object",
+    "hint": "对主链对话请求的介入方式：监视 / 放行（注入后交主链）/ 阻断（静默）/ 接管改换（按模板组装提示词，直连接管模型生成并发送）。",
+    "items": {
+      "enabled": {
+        "description": "拦截参与总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后插件完全不参与主链 LLM 请求（不记录、不注入、不阻断）；开启后才按下方「介入方式」工作。"
+      },
+      "mode": {
+        "description": "介入方式",
+        "type": "string",
+        "default": "接管走主链",
+        "options": [
+          "监视",
+          "放行",
+          "阻断",
+          "接管改换",
+          "接管走主链"
+        ],
+        "hint": "监视：什么都不管只记录；放行：注入各模块锚与托管记忆后交主链回复；阻断：拦截并静默（不发送 LLM）；接管改换（默认）：所有开启模块注入成最终信息格式后直连接管模型统一发送；接管走主链：把模板写进主链即将发给 LLM 的请求并放行（回复走主链管线，用主链默认模型）。"
+      },
+      "max_records": {
+        "description": "记录条数上限",
+        "type": "int",
+        "default": 50,
+        "hint": "内存中保留的拦截记录条数（超出后丢弃最早的），10–200。"
+      },
+      "provider_id": {
+        "description": "接管改换模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "「接管改换」模式下直连该模型生成回复（不经过主链）；留空按「留空回退模型」策略解析，驳回时不发送并记报错日志。"
+      },
+      "template": {
+        "description": "最终发送给对话 LLM 的信息格式",
+        "type": "string",
+        "default": "【本次对话上下文】\n{上下文}\n\n【对方刚刚说的话】\n{当前说话}\n\n【你是「为你续写的故事」里的角色，以下是此刻的你】\n{身份}\n{关系}\n{风格}\n{状态}\n{日程}\n{记忆}\n{天气}\n{见闻}\n当前时间：{时间}\n\n请以这个角色的身份，基于本次对话上下文，自然回应对方刚刚说的话；不要提任何系统机制。",
+        "hint": "「接管改换」模式下作为发送给对话模型的最终信息格式；占位符：{上下文} {当前说话} {身份} {关系} {风格} {状态} {日程} {记忆} {天气} {见闻} {时间}，发送前替换为各模块当前内容。"
+      },
+      "takeover_fallback": {
+        "description": "接管失败时",
+        "type": "string",
+        "default": "放行主链",
+        "options": [
+          "放行主链",
+          "提示文案",
+          "静默"
+        ],
+        "hint": "接管模型缺失/驳回/超时/失败时：放行主链=不阻断，交主链原样回复（Bot 不会没反应，推荐）；提示文案=直发「调用超时后的回复」文案（为空则静默）；静默=原行为（无任何回复）。"
+      }
+    }
+  },
+  "debounce": {
+    "description": "消息防抖",
+    "type": "object",
+    "hint": "把用户短时间内的连续消息合并为一条再发送给 LLM，减少频繁触发回复；窗口内消息不触发 LLM，到期后合并发送。",
+    "items": {
+      "enabled": {
+        "description": "防抖总开关",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后按会话收集连续消息并合并发送；关闭后消息原样处理。智能判断、自适应与固定窗口等策略均在此开关之下。"
+      },
+      "recall_filter": {
+        "description": "撤回过滤",
+        "type": "bool",
+        "default": true,
+        "hint": "防抖窗口内收到撤回通知时，从待合并内容中移除被撤回的消息。"
+      },
+      "private_only": {
+        "description": "仅私聊",
+        "type": "bool",
+        "default": true,
+        "hint": "仅对私聊消息合并（群聊多人消息混发会导致误合并）；关闭则群聊也参与。"
+      },
+      "adaptive": {
+        "description": "自适应防抖",
+        "type": "bool",
+        "default": true,
+        "hint": "按消息长度与结尾标点动态调整等待时长（短句/未完成标点等待更久），并在总等待上限内强制结算。智能判断开启时此设置被取代（不生效）。"
+      },
+      "smart_judge": {
+        "description": "智能判断",
+        "type": "bool",
+        "default": true,
+        "hint": "实验功能，慎用。开启后取代固定时长与自适应时长的防抖：每次缓冲内容更新都会直连所选模型快速判断“对方是否已经说完”，判定放行则立即合并发送给主 LLM，判定继续则重新开始一轮等待；期间再有新消息会再次触发判断。"
+      },
+      "smart_provider_id": {
+        "description": "智能判断模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "直连该模型做快速判定（不经过 AstrBot 主链）。留空按「留空回退模型」策略解析。"
+      },
+      "smart_max_quiet_wait": {
+        "description": "判继续后无更新的最终等待时长（秒）",
+        "type": "float",
+        "default": 3.0,
+        "hint": "智能判定「继续等待」与快速确认窗口（每收到一条消息重置一次）。默认 3s——连发消息最后一句话后最多等 3s 就放行；判定（release）可提前。"
+      },
+      "window": {
+        "description": "防抖窗口（秒）",
+        "type": "float",
+        "default": 2.0,
+        "hint": "关闭自适应防抖时的固定等待时长；连续消息间隔小于该时长会被合并。智能判断开启时此设置被取代（不生效）。"
+      },
+      "min_wait": {
+        "description": "最短等待（秒）",
+        "type": "float",
+        "default": 1.0,
+        "hint": "自适应防抖的最短等待时长。智能判断开启时被取代（不生效）。"
+      },
+      "max_wait": {
+        "description": "最长等待（秒）",
+        "type": "float",
+        "default": 6.0,
+        "hint": "自适应防抖的单轮最长等待时长。智能判断开启时被取代（不生效）。"
+      },
+      "max_total_wait": {
+        "description": "总等待上限（秒）",
+        "type": "float",
+        "default": 12.0,
+        "hint": "会话自开始起的累计等待上限，达到后立即合并发送。智能判断开启时被取代（不生效）。"
+      },
+      "merge_separator": {
+        "description": "合并分隔符",
+        "type": "string",
+        "default": "\n",
+        "hint": "合并多条消息时使用的分隔符（默认换行）。"
+      },
+      "command_prefixes": {
+        "description": "命令前缀列表",
+        "type": "string",
+        "default": "/",
+        "hint": "以这些前缀开头的消息识别为命令，不参与防抖合并（直接放行）。多个前缀用空格或逗号分隔，如：/ ! #"
+      },
+      "smart_use_context": {
+        "description": "联动【为你篆刻的历史】插件取上下文",
+        "type": "bool",
+        "default": false,
+        "hint": "智能判断时，把该会话最近对话（【为你篆刻的历史】时间线/图片转述/文档总结）带给判定模型形成上下文呼应。需要已装并联动【为你篆刻的历史】插件；未联动却开启会打印报错并跳过上下文。"
+      },
+      "smart_context_count": {
+        "description": "携带上下文条数",
+        "type": "int",
+        "default": 4,
+        "hint": "取自【为你篆刻的历史】时间线的最近条数（1–20）；每条≤100字，与缓冲内容共用 1500 字总预算，超出从最旧丢弃。"
+      },
+      "smart_judge_timeout": {
+        "description": "判定超时保护(秒)",
+        "type": "int",
+        "default": 4,
+        "hint": "智能判定单次 LLM 调用的超时保护：超时快速回退固定窗口（不阻塞防抖）。默认 4s——判定模型一般 1-3s 即可返回。"
+      },
+      "smart_judge_min_interval": {
+        "description": "判定最小间隔(秒)",
+        "type": "float",
+        "default": 2.5,
+        "hint": "连续短消息不重复调用判定模型（节流），减少判定调用次数与等待。"
+      }
+    }
+  },
+  "memory": {
+    "description": "记忆联动",
+    "type": "object",
+    "hint": "与「为你篆刻的历史」联动：托管注入 + 写入约定/愿望 + 提炼用户画像。",
+    "items": {
+      "managed_injection": {
+        "description": "托管记忆注入",
+        "type": "bool",
+        "default": true,
+        "hint": "装载【为你篆刻的历史】插件时，该插件跳过自动注入，改由本插件注入记忆（拦截模式下不注入，放行/拟人化模式下注入）。"
+      },
+      "commitment_enabled": {
+        "description": "写入约定/愿望",
+        "type": "bool",
+        "default": true,
+        "hint": "检测到「约定/答应/以后要」等消息时，用 LLM 提炼成一条承诺记忆写入【为你篆刻的历史】插件。"
+      },
+      "profile_enabled": {
+        "description": "提炼用户画像",
+        "type": "bool",
+        "default": true,
+        "hint": "从最近对话里提炼稳定偏好/习惯/身份，定期写入【为你篆刻的历史】插件。"
+      },
+      "embedding_provider_id": {
+        "description": "嵌入模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "向量嵌入用（直达）；留空回退到第一个可用嵌入 provider（嵌入无法从聊天模型中挑选）。"
+      },
+      "profile_provider_id": {
+        "description": "画像模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "用户画像提炼用；留空按「留空回退模型」策略解析。"
+      },
+      "commitment_provider_id": {
+        "description": "约定模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "约定/愿望提炼用；留空按「留空回退模型」策略解析。"
+      }
+    }
+  },
+  "identity": {
+    "description": "防认错",
+    "type": "object",
+    "hint": "在发给 LLM 的请求里明确「当前对话的人是谁」，防止记忆/上下文里混入他人导致认错人。",
+    "items": {
+      "enabled": {
+        "description": "防认错锚总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后在放行/拟人化模式下注入对话人物判定（含防混淆提示），称呼从【为你篆刻的历史】插件取、兜底平台昵称。"
+      },
+      "custom_text": {
+        "description": "防认错注入内容（覆盖自动生成）",
+        "type": "string",
+        "default": "【防认错·当前对话对象】\n当前和你对话的人：{当前用户}\n发送场合：{场合}\n提示：发给你的提示词里已含当前对话、记忆与上下文，下面是区分人物的提醒，不要把这些来源张冠李戴。\n同一人换昵称/头像仍是同一人；对方自称别人而账号对不上时不轻信，不把别人的秘密/亲昵称呼/隐私交给 TA；\n若记忆里没有这个人（陌生/不熟），保持客气但不过分亲密，明确表示还不熟悉，别主动套近乎。",
+        "hint": "留空 = 自动生成防认错提示；填写 = 此后固定使用（可引用占位符 {当前用户} {场合}）；清空恢复自动。建议搭配防抖的 {当前说话}{上下文} 使用。"
+      }
+    }
+  },
+  "voice": {
+    "description": "风格锚",
+    "type": "object",
+    "hint": "把「说话风格档案」注入请求，让 LLM 按档案说话；档案在「风格」选项卡编辑（多维度 + 口头禅频率与语境）。",
+    "items": {
+      "enabled": {
+        "description": "风格锚总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后在放行/拟人化模式下注入说话风格档案。"
+      },
+      "provider_id": {
+        "description": "风格生成模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "「一键生成」直连该模型生成整套风格档案（不走主链）；留空按「留空回退模型」策略解析，驳回时生成失败并报错日志。"
+      },
+      "verbosity": {
+        "description": "话量倾向",
+        "type": "string",
+        "default": "",
+        "hint": "惜字如金 / 适中 / 话痨偏长爱铺陈；可附带单次句数偏好。留空则不强调。"
+      },
+      "group_quiet": {
+        "description": "群聊降噪",
+        "type": "bool",
+        "default": true,
+        "hint": "群聊场合时收敛亲昵与私聊腔、不刻意外露状态，保持简短自然。"
+      }
+    }
+  },
+  "presence": {
+    "description": "状态锚",
+    "type": "object",
+    "hint": "Bot 的「此刻状态」（心情/精力/正在想的事），在「状态」选项卡编辑或一键生成；注入后只影响语气，不降理解质量。",
+    "items": {
+      "enabled": {
+        "description": "状态锚总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后在放行/拟人化模式下注入当前状态。"
+      },
+      "light_evolve_enabled": {
+        "description": "轻量事件演化",
+        "type": "bool",
+        "default": true,
+        "hint": "纯规则、不调 LLM：对话中的情绪词/求助/道谢/争执会即时染色心绪并留下涟漪+余波。关闭后这些全部停止写盘（已有数据保留），状态只会在手动一键生成或开启「自动演化」时变化。"
+      },
+      "auto_refresh": {
+        "description": "自动演化（节拍）",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关：升级后不会自动调模型，需要时手工一键生成或开启此处。开启后按「演化节拍间隔」像人一样慢慢刷新状态（深夜/清晨等自带时间底色）。"
+      },
+      "weather": {
+        "description": "当前天气",
+        "type": "string",
+        "default": "",
+        "hint": "手动填当前天气（如「晴，25 度」），影响状态演化；留空则不带天气背景。"
+      },
+      "provider_id": {
+        "description": "状态模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "状态生成用；留空按「留空回退模型」策略解析。"
+      },
+      "beat_interval": {
+        "description": "演化节拍间隔",
+        "type": "int",
+        "default": 30,
+        "hint": "每隔多少分钟做一次状态演化刷新（仅当「自动演化」开启时生效），默认 30 分钟。"
+      },
+      "time_bg_enabled": {
+        "description": "时间底色",
+        "type": "bool",
+        "default": true,
+        "hint": "深夜/清晨/白天/赴约前给状态一层自然的“背景光”（影响语气），不是强制闸门。"
+      },
+      "ripple_enabled": {
+        "description": "互动涟漪",
+        "type": "bool",
+        "default": true,
+        "hint": "有重量的互动（分享/求助/道谢/争执）会留下一句“刚才那话我还没完全出来”的余光，最多 3 条新的顶旧的，自然消散。"
+      },
+      "memory_drydock": {
+        "description": "心事素材（联动记忆插件）",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，自动演化时可从【为你篆刻的历史】取当前会话最近约定 top1 作为“心里挂着”的素材（不走 embedding、不驱动情绪，仅当真的还惦记才用）；未装载记忆插件则跳过。"
+      },
+      "stain_interval": {
+        "description": "情绪染色最短间隔",
+        "type": "int",
+        "default": 5,
+        "hint": "对话中情绪词触发染色/涟漪的最短间隔（防刷，单位分钟），默认 5 分钟；想要更灵敏可调低。"
+      }
+    }
+  },
+  "schedule": {
+    "description": "日程锚",
+    "type": "object",
+    "hint": "Bot 的每日日程（时间→活动），影响状态与主动对话；在「日程」选项卡编辑或一键生成。",
+    "items": {
+      "enabled": {
+        "description": "日程锚总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后在放行/拟人化模式下注入当前日程（只影响语气节奏，不照搬）。"
+      },
+      "auto_manage_enabled": {
+        "description": "实时调整（像人）",
+        "type": "bool",
+        "default": true,
+        "hint": "对话里出现明确的日程/穿搭安排时，Bot 会用日程模型判断重要性/冲突，像人一样决定：替换对应时段（原安排进延误池）、排进空档、放进未来规划、或改穿搭。检测门槛高：只有明确的安排才会触发，不会每句话都判定；不调 LLM 时跳过。"
+      },
+      "provider_id": {
+        "description": "日程模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "日程生成用；留空按「留空回退模型」策略解析。"
+      },
+      "diary_time": {
+        "description": "写日记时间(HH:MM)",
+        "type": "string",
+        "default": "23:30",
+        "hint": "每天日程里固定排一段「写日记」的时间（睡前收尾）。生成日程时模型会照此安排，到点（±30 分钟窗口）后台自动写日记。格式 HH:MM。"
+      },
+      "diary_minutes": {
+        "description": "写日记时长(分钟)",
+        "type": "int",
+        "default": 20,
+        "hint": "日程里安排给写日记的时长（5–60 分钟，默认 20）。只影响日程里的时间块与自动触发窗口。"
+      }
+    }
+  },
+  "rewrite": {
+    "description": "润色",
+    "type": "object",
+    "hint": "LLM 回复后（接管直连/接管走主链/放行）被捕获并交由润色模型二次润色与人格校准，让回复更贴近人格与语气。",
+    "items": {
+      "enabled": {
+        "description": "回复润色总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，捕获 LLM 回复（接管直连/走主链/放行）并交给润色模型按模板二次润色与人格校准；失败/驳回时用原回复。"
+      },
+      "rewrite_user_enabled": {
+        "description": "放行时润色用户消息",
+        "type": "bool",
+        "default": false,
+        "hint": "放行模式下，把用户消息先轻量润色得更自然再交主链（额外一次 LLM 调用，默认关）。"
+      },
+      "provider_id": {
+        "description": "润色模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "润色直连该模型（不走主链）；留空按「留空回退模型」策略，驳回时用原回复并报错日志。"
+      },
+      "template": {
+        "description": "发送给润色 LLM 的模板",
+        "type": "string",
+        "default": "【你的身份】（可直接用于校准语气的角色背景）\n{人格}\n\n【说话风格】\n{风格}\n\n【此刻状态】\n{状态}\n\n【与对方的关系】\n{关系}\n\n【对方刚刚说的话】\n{当前说话}\n（当前用户：{当前用户}，场合：{场合}）\n\n请把下面这条「待润色回复」在不改变信息与意图的前提下，二次润色并做人格校准——更贴近上面的人格/风格/状态与语气，更像这个角色会说的话；不要解释、不要引号、不要多余内容；如果已经足够合适，就基本原样输出，只做必要微调。\n\n【待润色回复】\n{回复}",
+        "hint": "润色提示词模板；占位符：{人格}{风格}{状态}{关系}{当前说话}{当前用户}{场合}{回复} 等，发送前替换。"
+      }
+    }
+  },
+  "proactive": {
+    "description": "主动对话",
+    "type": "object",
+    "hint": "智能主动触达：由状态/日程/记忆里的约定愿望取材，在时间窗内随机间隔发起；克制打扰。",
+    "items": {
+      "enabled": {
+        "description": "主动对话总开关",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后按时间窗与间隔主动给目标用户发消息。"
+      },
+      "target_users": {
+        "description": "想让她主动找的人",
+        "type": "string",
+        "default": "",
+        "hint": "填你想让 Bot 主动聊天的人：① QQ 号（如 123456）最省事，一人一行；② 也可以粘贴完整的会话地址（如 aiocqhttp:FriendMessage:123456）。留空 = 不主动找任何人。"
+      },
+      "session_platform": {
+        "description": "消息平台(默认 QQ)",
+        "type": "string",
+        "default": "aiocqhttp",
+        "hint": "只填 QQ 号时，主动消息按此平台发送。默认 aiocqhttp = QQ；用 Telethon 等其它适配器请改成对应前缀（如 telethon）。"
+      },
+      "template": {
+        "description": "发给主动模型的提示词模板(可自定义)",
+        "type": "text",
+        "default": "",
+        "hint": "留空用内置默认（两级裁决：值不值得发 → 自然表达）。填了就用你的模板，占位符：{由头} {心情} {日程} {记忆} {未完成} {见闻} {梦} {时间}——按需拼进模板；留空的部分自动省略。模板需自行要求「输出 :NO: 表示不值得发」。"
+      },
+      "time_start": {
+        "description": "时间窗开始",
+        "type": "string",
+        "default": "09:00",
+        "hint": "主动消息允许的时间窗起点（HH:MM）。"
+      },
+      "time_end": {
+        "description": "时间窗结束",
+        "type": "string",
+        "default": "22:00",
+        "hint": "主动消息允许的时间窗终点（HH:MM，支持跨零点）。"
+      },
+      "min_interval_hours": {
+        "description": "最小间隔（小时）",
+        "type": "float",
+        "default": 4.0,
+        "hint": "两次主动消息之间的最短间隔。"
+      },
+      "max_interval_hours": {
+        "description": "最大间隔（小时）",
+        "type": "float",
+        "default": 8.0,
+        "hint": "两次主动消息之间的最长间隔（用于随机）。"
+      },
+      "max_daily": {
+        "description": "每日上限(条)",
+        "type": "int",
+        "default": 3,
+        "hint": "每天最多主动发几条（0 = 不限制，想多主动就调大；默认 3 条，克制不打扰）。"
+      },
+      "quiet_hours": {
+        "description": "免打扰时段",
+        "type": "string",
+        "default": "23:00-08:30",
+        "hint": "这段时间不主动发消息（如 23:00-08:30 = 深夜到早晨不打扰；跨零点用 HH:MM-HH:MM 写法）。想让她夜里陪你聊就改成更短或留空（留空 = 全天可发）。"
+      },
+      "cooldown_after_chat_minutes": {
+        "description": "刚聊完顺延（分钟）",
+        "type": "int",
+        "default": 30,
+        "hint": "用户刚发过消息后，这段时间内不主动打扰。"
+      },
+      "provider_id": {
+        "description": "主动模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "主动消息生成用；留空按「留空回退模型」策略解析。"
+      },
+      "archive_history": {
+        "description": "写入会话历史",
+        "type": "bool",
+        "default": true,
+        "hint": "主动消息发送成功后，把它以「Bot 发给你的消息」写入 AstrBot 会话历史（官方通道）。这样：① 下一次你说话时，主链的上下文里能看到这条主动消息，聊天更连贯；② AstrBot 会话记录里也有它。关闭后主动消息只存在于本插件的记忆回填里。"
+      },
+      "unanswered_slowdown_start": {
+        "description": "未回应放大起步(次)",
+        "type": "int",
+        "default": 2,
+        "hint": "连续未回应达到第几次后，下次主动的间隔开始放大（每次多放 0.35 倍，封顶见下项）。像人一样：被晾着就不再频繁往上凑。"
+      },
+      "unanswered_max_interval_multiplier": {
+        "description": "未回应间隔放大封顶(倍)",
+        "type": "float",
+        "default": 2.2,
+        "hint": "未回应导致的主动间隔放大倍数上限（最小 1.0 倍 = 不放大）。"
+      },
+      "silent_after_streak": {
+        "description": "静默闸门·未回应次数",
+        "type": "int",
+        "default": 3,
+        "hint": "连续未回应达到此数、且悬置时间超过下一项的小时数后，暂停普通主动（比每日上限更优先），等对方先开口。"
+      },
+      "silent_after_hours": {
+        "description": "静默闸门·悬置小时数",
+        "type": "float",
+        "default": 24,
+        "hint": "配合上一项：连续未回应达到设定次数且距最后一次主动已超过这么多小时，才触发静默闸门。"
+      },
+      "mood_link": {
+        "description": "未回应→心情联动",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后：连续未回应达到下方次数，Bot 心情会微降一档（tone 变低、留一条「对方一直没回」的涟漪），你回话后回升一档；心情偏收时主动意愿也会更淡（温度变冷）。关闭后未回应只影响节奏与措辞，不动心情。"
+      },
+      "mood_down_streak": {
+        "description": "心情微降·未回应次数",
+        "type": "int",
+        "default": 2,
+        "hint": "连续未回应达到第几次时触发一次心情微降（同一轮内只降一次；对方回复后才会回升）。"
+      }
+    }
+  },
+  "models": {
+    "description": "模型配置",
+    "type": "object",
+    "hint": "模型解析全局策略：各功能的模型已分散到所属模块页内配置；这里管理「留空回退」策略。模块内模型留空时的回退/驳回行为以此页为准。",
+    "items": {
+      "direct_enabled": {
+        "description": "直连上游通道",
+        "type": "bool",
+        "default": true,
+        "hint": "★ 影响很大，建议保持开启 ★ 开启后，OpenAI 兼容提供商（各家 DeepSeek/OpenAI/硅基/本地 vLLM 等）的直连生成不再走 AstrBot 内置客户端，而是插件自建请求直连上游：① 绕开 AstrBot 客户端写死的超时墙（例如非流式 30 秒/120 秒必超时的问题）；② 才能附带下方「关闭思考」参数。任何一步拿不到直连信息（非 OpenAI 兼容/供应商特供形式）或直连失败，都会自动回退原通道，不影响使用。关闭后回到 AstrBot 客户端路径（受其超时墙限制）。"
+      },
+      "disable_thinking": {
+        "description": "关闭思考（直连生成）",
+        "type": "bool",
+        "default": true,
+        "hint": "★ 影响很大，请先读透 ★ 开启后，直连生成会附带通用「关闭思考」参数（{\"thinking\":{\"type\":\"disabled\"}}，DeepSeek 官方标准格式，各主流 OpenAI 兼容服务通用）。为什么需要：DeepSeek V4 等现代推理模型默认对任何任务都先“思考”——对「生成一整天日程」这类简单结构化任务也会空想 1~5 分钟甚至烧掉数万 Token（实测），而关闭思考后同样的任务 10~20 秒完成。影响面：① 仅对插件自己的直连生成生效，不影响您在 AstrBot 里的日常对话；② 结构化任务（日程/穿搭/状态/判断/衣柜）几乎无损提速；③ 创作类任务（接管回复/润色/人格/风格/做梦/主动对话）已自动保留思考、不受此开关影响；④ 若您的提供方不认该参数（HTTP 400/422），插件会自动去掉参数重试一次，绝不会报错。关闭此开关 = 所有直连生成回到“让模型自由思考”状态，速度退回分钟级。"
+      },
+      "stream_enabled": {
+        "description": "流式直连生成",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，所有模块的直连生成（日程/状态/风格/人格/润色/接管/判断等「一键生成」类）优先走流式：逐字返回、更稳，可规避部分上游（如 SiliconFlow DeepSeek 系）非流式长输出时的「Request timed out」。关闭则回到一次性请求（旧行为）。注：启用「直连上游通道」后此开关只影响“直连用流式还是非流式”，超时墙已被直连绕开。"
+      },
+      "stream_retry": {
+        "description": "流式超时重试次数",
+        "type": "int",
+        "default": 1,
+        "hint": "流式调用遇到超时/失败自动重试的次数（默认 1，即最多共尝试 2 次）。超时多为偶发，重试通常能成功；网络极差时可调高。"
+      },
+      "stream_timeout": {
+        "description": "单次生成超时(秒)",
+        "type": "int",
+        "default": 120,
+        "hint": "每次直连生成（流式/非流式）的最长等待秒数，超时自动放弃本次并（流式时）重试；防止卡在“生成中”不动。默认 120 秒。"
+      },
+      "stream_max_tokens": {
+        "description": "生成预算上限(max tokens)",
+        "type": "int",
+        "default": 4000,
+        "hint": "直连生成时发给模型的输出预算上限（保险丝）：正常生成在预算内自然收尾、绝不截断；只有模型跑飞超写（如重复循环）才会被硬截断（此时解析失败会走重试/报错）。它不决定生成速度——速度由模型输出量×生成速率决定。日程/穿搭等结构化输出的实际用量仅 1~2 千 token，默认 4000 已很宽松；觉得“输出不够长”可调大，防跑飞可调小。"
+      },
+      "stream_max_chars": {
+        "description": "生成内容长度上限(字符)",
+        "type": "int",
+        "default": 12000,
+        "hint": "流式生成时正文累计超过该长度立即放弃本次尝试（防模型跑飞重复输出，空耗时间与 Token）。日程/穿搭等 JSON 一般 2 千字符以内，默认 12000 已很宽松。"
+      },
+      "stream_max_think_chars": {
+        "description": "思考长度上限(字符)",
+        "type": "int",
+        "default": 24000,
+        "hint": "推理模型的思考内容（不计入正文）累计超过该长度立即放弃本次尝试并直接回退非流式（确定性失败不重试——重试同一提示词必然同样失败）。取值权衡：太低会把「思考较久但能正常答完」的模型误杀；太高则跑飞风暴（几万 Token 的空想）截停得晚。默认 24000≈容忍较长的正常思考、同时把明显跑飞截在超时前。"
+      },
+      "fallback_enabled": {
+        "description": "留空回退模型",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，任何模块内模型留空时回退到下面的「回退模型」；回退模型也为空或无效时，相关请求会被驳回并输出报错日志。关闭后，模块内模型留空会直接驳回报错。"
+      },
+      "fallback_provider_id": {
+        "description": "回退模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "「留空回退模型」开启时，各模块留空统一回退到该模型；留空且开启回退时，所有回退请求会被驳回并输出报错日志。"
+      }
+    }
+  },
+  "vision": {
+    "description": "图片识图",
+    "type": "object",
+    "hint": "用户图片直连识图模型，智能转述后作为图片位置的消息注入。",
+    "items": {
+      "enabled": {
+        "description": "识图开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后用户发图片会直连识图模型转述（表情包只说明情绪，不啰嗦描述画面）。"
+      },
+      "provider_id": {
+        "description": "识图模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "图片转述用（直达）；留空按「留空回退模型」策略解析。"
+      },
+      "file_summary": {
+        "description": "文件文档摘要",
+        "type": "bool",
+        "default": true,
+        "hint": "对方发来文本类文档（txt/md/json/代码等）时，读取前 2 万字符并概括 2-3 句，让回复像人一样接得住「TA 发了份文档」。非文本类文件只记名字。"
+      },
+      "link_summary": {
+        "description": "链接标题与要点",
+        "type": "bool",
+        "default": true,
+        "hint": "对方发来链接时，抓取网页标题/描述/开头文字并概括一句要点，回复能自然接话（拿不准只给标题，不编造）。网络获取失败则只记域名。"
+      },
+      "media_retry": {
+        "description": "媒体调用重试次数",
+        "type": "int",
+        "default": 0,
+        "hint": "识图/文档摘要/链接要点的单个子调用失败或超时后重试几次（每次完整超时窗口，媒体调用为并行执行；默认 0 = 不重试）。网络不稳/免费接口可调到 1-2。"
+      },
+      "file_max_chars": {
+        "description": "文档读取上限(字符)",
+        "type": "int",
+        "default": 40000,
+        "hint": "短文档直接全读并概括；超过此上限会自动分块读完整份文档再汇总（像人从头读到尾记住重点），不再只读开头。上限范围 2000-200000；数值大更完整但更耗 Token。"
+      },
+      "gif_frames": {
+        "description": "动图抽帧数",
+        "type": "int",
+        "default": 3,
+        "hint": "动态表情包（GIF）均匀抽取几帧、同一次识图同时传入做连贯理解（默认 3 帧：首/中/尾；范围 1-9）。"
+      }
+    }
+  },
+  "pipeline": {
+    "description": "回复链路",
+    "type": "object",
+    "hint": "回复链路：智能判定（沉默/草草回复/表情包）。二次润色已迁移到「润色」模块。",
+    "items": {
+      "enabled": {
+        "description": "回复链路总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后主链回复会经过二次润色与智能判定。"
+      },
+      "judge_enabled": {
+        "description": "智能判定",
+        "type": "bool",
+        "default": true,
+        "hint": "用判定模型决定是否沉默、只草草回复、或携带表情包。"
+      },
+      "provider_id": {
+        "description": "判定模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "沉默/表情包/草草回复判定用；留空按「留空回退模型」策略解析。"
+      }
+    }
+  },
+  "emoji": {
+    "description": "表情包",
+    "type": "object",
+    "hint": "本地图库 + 自定义分类；判定模型按语境匹配分类后选一张发送。",
+    "items": {
+      "enabled": {
+        "description": "表情包总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后允许回复携带表情包（由判定模型按语境决定）。"
+      },
+      "send_probability": {
+        "description": "发送概率",
+        "type": "float",
+        "default": 0.25,
+        "hint": "判定允许表情包时，实际发送的概率（0–1）。「像人」：表情包可以有，但多数话还是文字为主（默认 0.25）；并会按你的反馈（正面词升、负面词降）自动微调。"
+      },
+      "judge_provider_id": {
+        "description": "表情包判定模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "「这个语境要不要发表情包」的独立判定名额（直连；与「判定模型」分开后互不排队）。留空按「留空回退模型」策略解析（通常回退到与判定模型相同，可填不同模型提速）。"
+      },
+      "duplicate_days": {
+        "description": "习惯组·去重天数",
+        "type": "int",
+        "default": 0,
+        "hint": "「习惯组」机制：Bot 按发送历史挑惯用表情包（用得多的高频图权重更高，也会轮换语义相近的其它张）。此值 >0 时额外要求同一张 N 天不重复；默认 0 = 不刻意去重（像人一样反复用自己的惯用组）。"
+      }
+    }
+  },
+  "send": {
+    "description": "发送缓冲与抢话",
+    "type": "object",
+    "hint": "只有「接管改换」链路的回复进缓冲（我们生成我们发；放行/走主链的回复由 AstrBot 管线发送，无法缓存）。",
+    "items": {
+      "enabled": {
+        "description": "发送缓冲总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后接管回复按自然句段拆成缓存、逐条发送（像人打字停顿）；用户在发送期间抢话 → 自动裁决。关闭则接管照旧一次性直发。"
+      },
+      "chunk_interval_min": {
+        "description": "短句间隔(秒)",
+        "type": "float",
+        "default": 0.8,
+        "hint": "短句（<20 字）缓存条之间的发送间隔下限（随机区间）。"
+      },
+      "chunk_interval_max": {
+        "description": "长句间隔(秒)",
+        "type": "float",
+        "default": 4.0,
+        "hint": "长句（>60 字）缓存条之间的发送间隔上限（随机区间；短句取小、长句取大，像打字停顿）。"
+      },
+      "interrupt_judge_enabled": {
+        "description": "抢话裁决",
+        "type": "bool",
+        "default": true,
+        "hint": "用户抢话时调用裁决模型判断：A=提速说完再回（插话不改变话题）；B=放弃剩余、把没说完的话带进下一轮重新组织（插话开启新话题/催促）。关闭则固定按 A 处理。"
+      },
+      "interrupt_judge_provider_id": {
+        "description": "抢话裁决模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "发送缓冲·抢话裁决用；留空按「留空回退模型」策略解析。"
+      }
+    }
+  },
+  "search": {
+    "description": "搜索",
+    "type": "object",
+    "hint": "无聊时搜索网页（tavily/bing），整理成可分享的见闻。",
+    "items": {
+      "enabled": {
+        "description": "搜索开关",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后主动对话会偶尔搜索网页作为见闻素材；「自主浏览」开启后她也会自己定时刷新鲜事。"
+      },
+      "browse_enabled": {
+        "description": "自主浏览（无聊时自己刷）",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后 Bot 会在（内心页可配的）间隔内自己搜一次「最近有什么新鲜事」并整理成见闻——像真人无聊时刷手机；与主动对话取材互不影响。关闭后仅主动对话/手动搜索才用。"
+      },
+      "browse_interval_hours": {
+        "description": "自主浏览间隔(小时)",
+        "type": "int",
+        "default": 6,
+        "hint": "自主刷新鲜事的最短间隔（2–24 小时）。太短显得机械且烧 token；太长则见闻更新慢。手动「搜一下」不受此限制。"
+      },
+      "engine": {
+        "description": "搜索引擎",
+        "type": "string",
+        "default": "tavily",
+        "options": [
+          "tavily",
+          "bing"
+        ],
+        "hint": "选择搜索后端。"
+      },
+      "api_key": {
+        "description": "API Key",
+        "type": "string",
+        "default": "",
+        "hint": "对应搜索引擎的 API Key。"
+      },
+      "result_count": {
+        "description": "结果数",
+        "type": "int",
+        "default": 3,
+        "hint": "每次搜索返回的结果条数（1–10）。"
+      },
+      "provider_id": {
+        "description": "搜索整理模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "搜索后整理见闻用；留空按「留空回退模型」策略解析。"
+      }
+    }
+  },
+  "relationship": {
+    "description": "关系模型",
+    "type": "object",
+    "hint": "Bot 与每个用户的关系档案：好感度 + 关系阶段（陌生/普通/熟络/亲近）+ 互动档位，随互动自然演进，决定称呼亲密度与语气分寸。",
+    "items": {
+      "enabled": {
+        "description": "关系模型总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后记录与用户的关系，随互动演进并注入语气分寸。"
+      },
+      "impression_batch": {
+        "description": "印象提炼触发条数",
+        "type": "int",
+        "default": 10,
+        "hint": "攒满多少条互动后触发一次「最近印象/情感」提炼（可改；太小频繁调 LLM，太大会滞后）。"
+      },
+      "impression_min_interval": {
+        "description": "印象提炼最短间隔(分钟)",
+        "type": "int",
+        "default": 30,
+        "hint": "同一用户两次印象提炼至少间隔的分钟数（防高频烧 token）。"
+      }
+    }
+  },
+  "wardrobe": {
+    "description": "穿搭与衣柜",
+    "type": "object",
+    "hint": "Bot 的衣柜（上限 30 件）与当前穿搭，由 LLM 结合天气/场合/心情生成，可改写。",
+    "items": {
+      "enabled": {
+        "description": "穿搭与衣柜总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后 Bot 拥有衣柜与穿搭，并在日程生成时一并确定。"
+      },
+      "provider_id": {
+        "description": "穿搭生成模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "「一键生成穿搭」「一键生成衣柜」直连该模型（不走主链）；留空按「留空回退模型」策略，驳回时生成失败并报错日志。"
+      }
+    }
+  },
+  "mind": {
+    "description": "内心",
+    "type": "object",
+    "hint": "内心世界的后台生成模型配置（梦境与闲时思考）。",
+    "items": {
+      "enabled": {
+        "description": "内心模块总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后台内心活动（深夜做梦/闲时思考/自主浏览见闻）与页面手动生成；关闭后内心页只剩历史记录。"
+      },
+      "think_daily_limit": {
+        "description": "每天思考次数上限",
+        "type": "int",
+        "default": 7,
+        "hint": "一天最多冒几回念头（1–24，默认 7）：事件驱动——附近有对话/状态/日程变化时才可能在 30~90 分钟随机窗口里冒一句，越聪明越'克制'。调小更像'很少发呆'，调大更像'爱想事情'。"
+      },
+      "dream_provider_id": {
+        "description": "梦境模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "深夜做梦用；留空按「留空回退模型」策略解析。"
+      },
+      "think_provider_id": {
+        "description": "思考模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "无聊时思考用；留空按「留空回退模型」策略解析。"
+      },
+      "diary_provider_id": {
+        "description": "日记模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "写日记用。默认留空时随「梦境模型」；也可指定独立模型。留空按「留空回退模型」策略解析。"
+      },
+      "think_interval_minutes": {
+        "description": "思考最小间隔(分钟)",
+        "type": "int",
+        "default": 60,
+        "hint": "距上次思考至少隔这么多分钟（且近期有事件）才可能再冒一句（事件驱动 + 随机窗口）。调小→更爱想事情；调大→更少发呆。"
+      }
+    }
+  },
+  "persona": {
+    "description": "人格",
+    "type": "object",
+    "hint": "把 AstrBot 人格/设定整理成一份 {人格} 注入体（身份背景、世界观等），与「风格」（说话方式）分工。",
+    "items": {
+      "enabled": {
+        "description": "人格注入总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后注入 {人格} 占位符；关闭则不注入该段。"
+      },
+      "provider_id": {
+        "description": "人格生成模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "「一键生成」直连该模型生成人格注入体（不走主链）；留空按「留空回退模型」策略，驳回时生成失败并报错日志。"
+      }
+    }
+  },
+  "troubleshoot": {
+    "description": "清障",
+    "type": "object",
+    "hint": "清障页自检参数：LLM 测试为真实最小对话探测（每模型一次极短调用，少量消耗）。",
+    "items": {
+      "llm_test_timeout": {
+        "description": "LLM 测试超时（秒）",
+        "type": "int",
+        "default": 15,
+        "min": 5,
+        "max": 120,
+        "hint": "「一键 LLM 测试」对每个模型发一句极短提示词验证生成链路；超过该秒数视为失败。测试依次串行执行（不并发）。"
+      }
+    }
+  },
+  "image": {
+    "description": "生图",
+    "type": "object",
+    "hint": "独立在线生图 API（真绘画）或 AstrBot 卡片渲染（免费文字卡片图）。",
+    "items": {
+      "enabled": {
+        "description": "生图总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后对话中出现「画一张…/帮我画…/我想看…」等明确绘画意图时才触发；未开启则完全不参与。"
+      },
+      "backend": {
+        "description": "后端模式",
+        "type": "string",
+        "default": "api",
+        "options": [
+          "api",
+          "card"
+        ],
+        "hint": "api=独立在线生图 API（需 base_url/api_key/model，推荐，真 AI 绘画）；card=AstrBot provider 的 text_to_image（当前默认渲染 HTML 文字卡片图，免费即时）。"
+      },
+      "max_daily": {
+        "description": "每日生成上限",
+        "type": "int",
+        "default": 5,
+        "hint": "每天最多生成的图片数；0=不限。生图按张计费，建议保留合理上限。"
+      },
+      "api_timeout_seconds": {
+        "description": "生成超时(秒)",
+        "type": "int",
+        "default": 120,
+        "hint": "单次生图请求的超时保护（主/备端点共用），默认 120s；生图通常 10-60s。"
+      },
+      "card_provider_id": {
+        "description": "卡片模式 provider",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "后端模式为 card 时使用（任选已配置 provider；调用其 text_to_image）。"
+      },
+      "api_enabled": {
+        "description": "启用主端点",
+        "type": "bool",
+        "default": true
+      },
+      "api_base_url": {
+        "description": "主端点 API 地址",
+        "type": "string",
+        "default": "",
+        "hint": "如 https://api.example.com/v1（OpenAI 兼容自动补 /images/generations；seedream/minimax 自动用 /v1/image_generation）。"
+      },
+      "api_api_key": {
+        "description": "主端点 API Key",
+        "type": "string",
+        "default": "",
+        "hint": "Bearer 认证。"
+      },
+      "api_model": {
+        "description": "主端点模型",
+        "type": "string",
+        "default": "",
+        "hint": "如 doubao-seedream-4-0-250828、image-01、flux-1.1-pro。"
+      },
+      "api_size": {
+        "description": "生成尺寸",
+        "type": "string",
+        "default": "1024x1024",
+        "hint": "如 1024x1024 / 1280x720（部分平台用比例概念，兼容发送）。"
+      },
+      "caption": {
+        "description": "发送附带的话",
+        "type": "string",
+        "default": "给你画好啦～",
+        "hint": "生图发送时图片后面附带的一句话；留空 = 只发图片不附文字。"
+      },
+      "judge_enabled": {
+        "description": "智能判定（实验，慎用）",
+        "type": "bool",
+        "default": false,
+        "hint": "实验：规则+上文未命中时，调用一个轻量 LLM 判断用户是否想要一张图（如「我那的云怎么样」→「给我看看？」）。开启后由下方模型处理，默认关闭=仅规则判定。"
+      },
+      "judge_provider_id": {
+        "description": "判定模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "生图意图仲裁专用（独立名额，不与对话/接管模型共用）；留空按「留空回退模型」解析。建议用便宜的轻量模型。"
+      },
+      "judge_timeout": {
+        "description": "判定超时(秒)",
+        "type": "int",
+        "default": 8,
+        "hint": "仲裁模型的单次超时；超时/未配置=安全回退不拦截聊天（绝不阻塞）。"
+      },
+      "judge_context_count": {
+        "description": "上下文条数",
+        "type": "int",
+        "default": 3,
+        "hint": "发给仲裁模型的最近对话条数（含机器人回复，按时间倒序取）；范围 1~8。"
+      },
+      "api_backup_enabled": {
+        "description": "启用备端点",
+        "type": "bool",
+        "default": false
+      },
+      "api_backup_base_url": {
+        "description": "备端点 API 地址",
+        "type": "string",
+        "default": ""
+      },
+      "api_backup_api_key": {
+        "description": "备端点 API Key",
+        "type": "string",
+        "default": ""
+      },
+      "api_backup_model": {
+        "description": "备端点模型",
+        "type": "string",
+        "default": ""
+      }
+    }
+  }
+}
