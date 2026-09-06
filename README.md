@@ -29,7 +29,7 @@
 **方式二：Git 安装**：AstrBot 插件市场支持通过 Git 仓库安装，直接添加：
 
 ```text
-https://github.com/xiaoxue00123/astrbot_plugin_storyteller
+https://github.com/zhengbi333/astrbot_plugin_storyteller
 ```
 
 **快速开始**：
