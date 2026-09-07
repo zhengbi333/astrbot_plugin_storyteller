@@ -122,6 +122,7 @@ TEMPLATE_PLACEHOLDERS: dict[str, str] = {
     "weather": "{天气}",
     "mind": "{见闻}",
     "image_wish": "{生图意愿}",
+    "search_result": "{搜索结果}",
     "time": "{时间}",
     "reply": "{回复}",
 }
@@ -130,7 +131,7 @@ TEMPLATE_PLACEHOLDERS: dict[str, str] = {
 TEMPLATE_ORDER = [
     "persona", "context", "current_text", "current_user", "place", "identity",
     "relationship", "voice", "presence", "schedule", "wardrobe", "memory",
-    "weather", "mind", "image_wish", "time", "reply",
+    "weather", "mind", "image_wish", "search_result", "time", "reply",
 ]
 
 DEFAULT_TEMPLATE = (
@@ -154,6 +155,7 @@ DEFAULT_TEMPLATE = (
     "{天气}\n"
     "{见闻}\n"
     "{生图意愿}\n"
+    "{搜索结果}\n"
     "当前时间：{时间}\n\n"
     "【若需要改写/润色的内容】\n"
     "{回复}\n\n"

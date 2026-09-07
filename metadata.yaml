@@ -1,7 +1,7 @@
-name: astrbot_plugin_storyteller
+﻿name: astrbot_plugin_storyteller
 display_name: 为你续写的故事
 author: 证毕＆deepseek
-version: alpha-0.188
+version: alpha-0.191
 description: 为你续写的故事：面向 AstrBot 的拟人陪伴插件。身份/关系/风格/人格、状态演化、每日日程与穿搭、内心世界（梦境/思考/见闻/日记）、主动对话、回复润色与拦截介入、表情包与 Token 统计——全部模块可配、自动保存，WebUI 一键管理。
 desc: 拟人陪伴插件：身份/关系/风格/人格、状态日程穿搭、内心世界、主动对话、润色拦截、表情包与 Token 统计，WebUI 全面管理。
 repo: https://github.com/zhengbi333/astrbot_plugin_storyteller

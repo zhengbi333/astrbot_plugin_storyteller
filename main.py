@@ -30,6 +30,7 @@ from .memory import (
     build_commitment_prompt,
     build_profile_prompt,
     build_session_context,
+    classify_remember,
     detect_commitment,
     detect_profile,
     parse_profile_items,
@@ -209,6 +210,8 @@ class StorytellerPlugin(Star):
         self._memory_managed_checked = False
         self._memory_managed_active = False
         self._image_wish_cache: dict[str, tuple[str, float]] = {}  # 0.183：会话 -> ({生图意愿} 标记文本, 时间戳)
+        self._search_result_cache: dict[str, tuple[str, str, float]] = {}  # 0.189：会话 -> ({搜索结果} 标记文本, 查询词, 时间戳)
+        self._memory_written_cache: dict[str, tuple[str, str, float, str]] = {}  # 0.191：会话 -> (已写入内容, 类型, 时间戳, 原文key)
         try:
             self._migrate_intercept_template()
         except Exception:
@@ -586,7 +589,21 @@ class StorytellerPlugin(Star):
                 )
                 logger.info("[Storyteller] 拦截阻断: session=%s prompt=%s", session_id, prompt[:60])
                 return
-            if mode == MODE_TAKEOVER:
+            if mode in (MODE_TAKEOVER, MODE_TAKEOVER_MAINCHAIN):
+                # 0.189：接管模板组装前先做会话搜索（{搜索结果} 占位符引用 10 分钟缓存）
+                if self.config.bool("search.enabled", True):
+                    try:
+                        await self._maybe_conversation_search(event, text)
+                    except Exception as exc:
+                        logger.warning("[Storyteller] 会话搜索处理异常: %s", exc)
+                # 0.191：对话中「记住/约定」→ 同步等待真实写入长期记忆（{记忆} 锚据此确认）
+                # _observe_message 后台写先启动，此处幂等同步兜底（相同内容只写一次）
+                if self.config.bool("memory.commitment_enabled", True):
+                    try:
+                        if detect_commitment(text):
+                            await self._write_commitment(event, text)
+                    except Exception as exc:
+                        logger.warning("[Storyteller] 记忆写入同步兜底异常: %s", exc)
                 self._sync_memory_managed(False)  # 直连回复记忆由 compose_injection 注入模板；主链被阻断
                 await self._takeover_reply(event, req, text, prompt, system_prompt)
                 return
@@ -803,6 +820,20 @@ class StorytellerPlugin(Star):
     # 弱信号：只有命中才进入仲裁（避免每句聊天都调 LLM）
     _IMAGE_WEAK_SIGNAL = re.compile(r"看看|看下|发我|给我看|让我看|拍我|画|照|图|照片|头像|壁纸|自拍|生成")
 
+    # ------------------------------------------------------------ 会话搜索意图（0.189）
+    # 命中即视为「想让我上网查」，触发真正的网页搜索，而不是让对话 LLM 凭空编
+    _SEARCH_INTENT_RE = re.compile(
+        r"帮我搜|帮我查|搜一下|搜下|搜搜|搜索|查一下|查查|查下|查询|查资料|查个|查点|"
+        r"上网查|百度一下|查查看|搜搜看|多少钱|价格|报价|行情|售价|价位"
+    )
+    # 搜索动词（用于从消息里剔除助动词，得到干净的查询词；先长后短避免「帮我查」截断「帮我查一下」）
+    _SEARCH_TRIGGER_CUT_RE = re.compile(
+        r"帮我搜一下|帮我查一下|帮我搜|帮我查|搜一下|查一下|搜下|查下|搜搜|查查|搜索|查询|"
+        r"查资料|查个|查点|上网查|百度一下|查查看|搜搜看"
+    )
+    # 非网络查询排除词：提到这些多半是查本地信息（日程/消息/文件…），不触发网页搜索
+    _SEARCH_NON_WEB = ("日程", "安排", "计划", "设置", "配置", "命令", "消息", "记录", "文件", "账单", "数据", "账")
+
     @staticmethod
     def _extract_image_subject(text: str) -> str:
         """从上文提取画面对象/景象词（云/天空/晚霞…），用于把泛化请求锚定到话题。"""
@@ -947,6 +978,104 @@ class StorytellerPlugin(Star):
         )
         self._image_wish_cache[session_id] = (hint, time.time())
         logger.info("[Storyteller] 生图意愿软标记: session=%s subj=%s", session_id, subj)
+        return True
+
+    # ------------------------------------------------------------ 会话搜索意图（0.189）
+    @staticmethod
+    def _extract_search_query(text: str) -> str:
+        """从消息里提取干净的查询词：取「搜索动词之后」的文本，而不是全文剔除。
+
+        全文剔除会把「嗯...帮我搜一下吧」拼成「嗯...吧」（实测 bug：Tavily 搜了垃圾词）；
+        只取触发词之后到第一个句末标点（？。！；/换行）的片段，避免把
+        「…的价格呗？咱的实验室也要购进一批设备了」后半句也搜进去。
+        """
+        t = str(text or "").strip()
+        m = StorytellerPlugin._SEARCH_TRIGGER_CUT_RE.search(t)
+        if m:
+            q = t[m.end():]
+        else:
+            q = t
+        q = re.split(r"[？?。！!；;\n]", q, maxsplit=1)[0]
+        q = re.sub(r"^[，,。．:：\s的帮请个点嗯啊哦诶哎]+", "", q)
+        q = re.sub(r"[。！？!?.,，、；;:：\s]+$", "", q)
+        q = re.sub(r"[吧呗嘛呀呢啊啦嗯哦]+$", "", q)
+        return q.strip()
+
+    async def _maybe_conversation_search(self, event: Any, text: str) -> bool:
+        """0.189：会话搜索意图（帮我搜/查一下 X/多少钱…）→ 真实网页搜索并缓存备注。
+
+        命中后调用 mind.search_and_think（真实搜索 + LLM 归纳；失败可见可转述），把备注存入
+        _search_result_cache；_anchor_values 的 {搜索结果} 占位符在 10 分钟内引用它，
+        接管模板里的对话 LLM 就能基于真实网页内容作答，不再凭空编造。
+        """
+        if not self.config.bool("search.enabled", True):
+            return False
+        if not self.config.bool("search.conversation_enabled", True):
+            return False
+        text = str(text or "")
+        if not self._SEARCH_INTENT_RE.search(text):
+            return False
+        if any(w in text for w in self._SEARCH_NON_WEB):
+            # 查日程/查消息/查文件等本地信息 → 不算网页搜索意图
+            return False
+        session_id = str(getattr(event, "unified_msg_origin", "") or "")
+        if not session_id:
+            return False
+        query = self._extract_search_query(text)
+        if len(query) < 2:
+            # 只说「帮我搜一下吧/搜搜看」没带主题词——从上文最近 24 小时找带搜索意图的消息补主题
+            # （实测：隔夜回「嗯...帮我搜一下吧」补昨晚「5090 显卡价格」的主题；回看条数随 context_count）
+            prev = await self._image_recent_user_text(
+                session_id,
+                limit=max(2, min(12, self.config.int("intercept.context_count", 4))),
+                window_seconds=86400,
+                exclude_text=text,
+            )
+            if prev and self._SEARCH_INTENT_RE.search(prev):
+                cand = self._extract_search_query(prev)
+                if len(cand) >= 2:
+                    query = cand
+                    logger.info(
+                        "[Storyteller] 会话搜索补主题: session=%s from_prev=%r", session_id, prev[:40]
+                    )
+        if len(query) < 2:
+            return False
+        try:
+            from .mind import search_and_think
+
+            result = await search_and_think(self, query, count=5)
+        except Exception as exc:
+            logger.warning("[Storyteller] 会话搜索异常: query=%s exc=%s", query, exc)
+            # 参考 AstrBot 的做法：失败信息交给上层如实转述，而不是让对话模型硬编
+            self._search_result_cache[session_id] = (
+                f"（这次搜索没成功——{exc}。如实告诉对方这次没查到，别硬编。）", query, time.time()
+            )
+            logger.info("[Storyteller] 会话搜索失败已缓存: session=%s query=%s", session_id, query)
+            return True
+        if not isinstance(result, dict):
+            return False
+        note = str(result.get("note") or "").strip()
+        results = result.get("results") or []
+        parts: list[str] = []
+        if note:
+            parts.append(note)
+        if isinstance(results, list):
+            for i, r in enumerate(results[:3], 1):
+                if not isinstance(r, dict):
+                    continue
+                title = str(r.get("title") or "").strip()
+                snippet = str(r.get("snippet") or "").strip()[:140]
+                if title or snippet:
+                    parts.append(f"[{i}] {title}：{snippet}" if title else f"[{i}] {snippet}")
+        meaning = "\n".join(parts).strip()
+        if not meaning:
+            # 没有拿到任何内容（无 key/无结果/归纳失败）——也如实转述，不缓存空备注
+            meaning = f"（搜「{query}」没查到什么内容。如实告诉对方这次没查到，别编造。）"
+        self._search_result_cache[session_id] = (meaning, query, time.time())
+        logger.info(
+            "[Storyteller] 会话搜索已缓存: session=%s query=%s note=%s字",
+            session_id, query, len(meaning),
+        )
         return True
 
     async def _judge_image_intent(self, event: Any, text: str) -> tuple[str, str]:
@@ -1200,6 +1329,24 @@ class StorytellerPlugin(Star):
                 values["image_wish"] = ""
         except Exception:
             values["image_wish"] = ""
+        # 0.189：{搜索结果} 占位符——会话搜索意图产出的真实网页搜索备注，10 分钟内生效
+        try:
+            session_id = str(getattr(event, "unified_msg_origin", "") or "")
+            cached = self._search_result_cache.get(session_id)
+            if cached and time.time() - cached[2] <= 600:
+                note, query, _ts = cached
+                values["search_result"] = (
+                    "【搜索结果】（这是刚才用户要我上网查的内容，来自真实网页搜索；"
+                    "回答可以参照下面条目，[1][2] 是来源编号，涉及数据可点出来源编号；"
+                    "如果搜索结果里没有把握，就直接说「我查到的不太确定」，不要编造）\n"
+                    + (note or "")[:400]
+                )
+            else:
+                if cached:
+                    self._search_result_cache.pop(session_id, None)
+                values["search_result"] = ""
+        except Exception:
+            values["search_result"] = ""
         return values
 
     def _current_user_label(self, event: AstrMessageEvent) -> str:
@@ -1228,9 +1375,12 @@ class StorytellerPlugin(Star):
         0.172：渲染时**按时间正序（旧→新）**，并给每行标注说话人（对方/我/系统/昵称）——
         此前无标注且时间线源返回最新在前，模型分不清谁说的、"你呢，吃了吗？"是谁在问（用户实测困惑）。
         需要联动记忆插件；未装载/取不到时返回空串（占位符替换为空，不阻塞接管发送）。
+        0.190：limit<=0（context_count=0）时直接返回空——不携带上下文。
         """
         bridge = self._get_memory_bridge()
         if bridge is None:
+            return ""
+        if limit <= 0:
             return ""
         try:
             getter = getattr(bridge, "get_timeline", None)
@@ -1639,7 +1789,9 @@ class StorytellerPlugin(Star):
             template = str(self.config.get("intercept.template", "") or "")
             anchors = self._anchor_values(event)
             anchors["current_text"] = prompt or user_text or "（对方没有说话）"
-            anchors["context"] = self._recent_timeline_text(session_id, limit=4)
+            anchors["context"] = self._recent_timeline_text(
+                session_id, limit=max(2, min(12, self.config.int("intercept.context_count", 4)))
+            )
             # 0.163：时间线可能已含本轮消息（防抖收集时就写入了记忆插件时间线）——剔除，
             # 否则"你好？"在 {当前说话}/{上下文}/【本次对话】里重复多次，模型以为对方在重复发问
             anchors["context"] = self._dedupe_current_message(
@@ -1663,6 +1815,8 @@ class StorytellerPlugin(Star):
             anchors["memory"] = _clean_memory_meta(
                 await self._compose_memory_text(event, fallback=anchors.get("memory", ""))
             )
+            # 0.191：刚写进长期记忆的话术 → {记忆} 锚附确认（一次性，10 分钟内）
+            anchors["memory"] = self._memory_confirm_hint(session_id) + str(anchors.get("memory") or "")
             if not anchors.get("persona", ""):
                 anchors["persona"] = await self._astrbot_default_persona()
             # 0.159：上下文/记忆为空时直接留白（不注入占位句——占位句"没有更早的对话记录"反而
@@ -1755,7 +1909,9 @@ class StorytellerPlugin(Star):
             # 「本次对话」注入：把防抖最终决定传给对话 LLM 的内容（当前说话）+ 上下文呼应喂进模板，
             # 由「拦＆改」统一整合发送（参考插件：所有功能注入完成后一次性发送）
             anchors["current_text"] = prompt or user_text or "（对方没有说话）"
-            anchors["context"] = self._recent_timeline_text(session_id, limit=4)
+            anchors["context"] = self._recent_timeline_text(
+                session_id, limit=max(2, min(12, self.config.int("intercept.context_count", 4)))
+            )
             # 0.163：时间线可能已含本轮消息（防抖收集时就写入了记忆插件时间线）——剔除，
             # 否则"你好？"在 {当前说话}/{上下文}/【本次对话】里重复多次，模型以为对方在重复发问
             anchors["context"] = self._dedupe_current_message(
@@ -1791,6 +1947,8 @@ class StorytellerPlugin(Star):
             anchors["memory"] = _clean_memory_meta(
                 await self._compose_memory_text(event, fallback=anchors.get("memory", ""))
             )
+            # 0.191：刚写进长期记忆的话术 → {记忆} 锚附确认（一次性，10 分钟内）
+            anchors["memory"] = self._memory_confirm_hint(session_id) + str(anchors.get("memory") or "")
             if not anchors.get("persona", ""):
                 anchors["persona"] = await self._astrbot_default_persona()
             # 0.159：上下文/记忆为空时直接留白（不注入占位句——占位句"没有更早的对话记录"反而
@@ -2480,27 +2638,73 @@ class StorytellerPlugin(Star):
         except Exception:
             pass
 
-    async def _write_commitment(self, event: AstrMessageEvent, text: str) -> None:
+    async def _write_commitment(self, event: AstrMessageEvent, text: str) -> str:
+        """0.191：对话中「记住/约定/偏好」类话术 → 真实写入长期记忆，返回 memory_id。
+
+        - 轻量检测命中后由 LLM 提炼 {content, memory_type}（JSON），失败回退全文 + 轻量分类；
+        - 写成功后记入 _memory_written_cache（会话粒度，10 分钟），供 {记忆} 锚确认注入；
+        - 幂等：相同内容 10 分钟内只写一次（_observe_message 后台与 on_llm_request 同步都触发时防双写）。
+        """
+        memory_id = ""
         try:
             bridge = self._get_memory_bridge()
             if bridge is None:
-                return
+                return ""
+            session_id = str(getattr(event, "unified_msg_origin", "") or "")
+            raw_key = (text or "").strip()
+            cached = self._memory_written_cache.get(session_id) if session_id else None
+            if cached and time.time() - cached[2] <= 600 and cached[3] == raw_key:
+                # 同会话 10 分钟内已写过相同消息：幂等跳过
+                return ""
             from .models import resolve_chat_provider as _resolve_commit
 
             provider, _pid = _resolve_commit(self.context, self.config, "commitment")
             if provider is None:
-                return
+                return ""
             resp = await chat_text(provider, self.config, prompt=build_commitment_prompt(text), session_id="storyteller_commitment")
-            content = str(getattr(resp, "completion_text", "") or "").strip()
+            raw = str(getattr(resp, "completion_text", "") or "").strip()
+            content, note_type = "", ""
+            if raw:
+                from .json_util import parse_json_lenient
+
+                obj = parse_json_lenient(raw)
+                if isinstance(obj, dict):
+                    content = str(obj.get("content") or "").strip()
+                    note_type = str(obj.get("memory_type") or "").strip()
             if not content:
-                return
+                content = raw or (text or "").strip()
+                note_type = ""
+            if not content:
+                return ""
+            if note_type not in ("promise", "preference", "fact", "note"):
+                note_type = classify_remember(text)
             memory_id = await write_memory(
-                bridge, content=content, memory_type="promise", event=event, importance=0.6
+                bridge, content=content, memory_type=note_type, event=event, importance=0.6
             )
             if memory_id:
-                logger.info("[Storyteller] 已写入约定/愿望: %s", content[:60])
+                if session_id:
+                    self._memory_written_cache[session_id] = (content, note_type, time.time(), raw_key)
+                logger.info("[Storyteller] 已写入记忆: type=%s %s", note_type, content[:60])
         except Exception as exc:
-            logger.warning("[Storyteller] 写入约定失败: %s", exc)
+            logger.warning("[Storyteller] 写入记忆失败: %s", exc)
+        return memory_id
+
+    def _memory_confirm_hint(self, session_id: str) -> str:
+        """0.191：读取「刚写入长期记忆」的一次性确认文案（供 {记忆} 锚附注，10 分钟内有效）。"""
+        try:
+            if not session_id:
+                return ""
+            cached = self._memory_written_cache.get(session_id)
+            if not cached or time.time() - cached[2] > 600:
+                return ""
+            self._memory_written_cache.pop(session_id, None)
+            content, note_type, _ts, _raw = cached
+            return (
+                f"（刚才对方要你一直记住的事，你已经写进长期记忆了：{content[:80]}。"
+                "可以在回应里自然确认一句，但别把内容复述成背诵。）\n"
+            )
+        except Exception:
+            return ""
 
     async def _flush_profile(self) -> None:
         """从画像素材提炼并写入记忆（带已有画像去重）。"""

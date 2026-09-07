@@ -1,4 +1,4 @@
-# 为你续写的故事（astrbot_plugin_storyteller）
+﻿# 为你续写的故事（astrbot_plugin_storyteller）
 
 > **本插件由 AI 制作**（DeepSeek 与 DSH 协同开发，作者署名：证毕＆deepseek）。
 >
@@ -10,7 +10,7 @@
 
 - 插件名：`astrbot_plugin_storyteller`
 - 中文名：为你续写的故事
-- 版本：`alpha-0.188`
+- 版本：`alpha-0.191`
 - 兼容：AstrBot `>= 4.22.0`
 - 编码：UTF-8
 

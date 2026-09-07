@@ -17,12 +17,32 @@ SOURCE_PLUGIN = "astrbot_plugin_storyteller"
 COMMITMENT_HINTS = (
     "约定", "说好", "答应", "以后", "下次", "改天", "回头", "有空",
     "想要", "想一起", "一起去", "记得", "别忘了", "一定要",
+    # 0.191：显式「记住/记一下」类话术补齐（此前只有「记得」，用户说「你记住xxx」检测不到）
+    "记住", "记一下", "记下来", "记着", "帮我记", "记忆一下", "存一下", "存下来", "记录下来",
 )
 
 PROFILE_HINTS = (
     "我喜欢", "我讨厌", "我不喜欢", "我最", "我习惯", "我一般", "我平时",
     "我超", "我特别", "我不吃", "我吃", "我住", "我是", "我在",
 )
+
+# 0.191：显式「记住/约定」消息的轻量分类（LLM 提炼失败时的兜底，也可直接用于弱模型场景）
+# 三档：强约定词 > 偏好词 > 弱约定词（避免「别忘了我爱吃辣」被误归为约定）
+REMEMBER_PROMISE_STRONG = ("约定", "说好", "答应", "约好", "说好了", "我们约", "答应我", "承诺")
+REMEMBER_PREF_KW = ("我喜欢", "我讨厌", "我不喜欢", "我最", "我习惯", "我平时", "我爱吃", "爱喝", "我不吃", "我不爱")
+REMEMBER_PROMISE_WEAK = ("以后", "下次", "别忘了", "一定要", "改天", "回头", "有空")
+
+
+def classify_remember(text: str) -> str:
+    """轻量分类：强约定/承诺 → promise；偏好 → preference；弱约定/其他 → promise / fact。"""
+    t = (text or "").strip()
+    if any(k in t for k in REMEMBER_PROMISE_STRONG):
+        return "promise"
+    if any(k in t for k in REMEMBER_PREF_KW):
+        return "preference"
+    if any(k in t for k in REMEMBER_PROMISE_WEAK):
+        return "promise"
+    return "fact"
 
 
 def build_session_context(event: Any) -> dict[str, str]:
@@ -94,10 +114,14 @@ async def write_memory(
 
 
 def build_commitment_prompt(text: str) -> str:
-    """构造「从消息提炼约定/愿望」的提示词。"""
+    """构造「从消息提炼记忆/约定/偏好」的提示词（0.191：输出 JSON 带类型）。"""
     return (
-        "判断下面这条用户消息是否包含一条值得记住的约定、愿望或承诺。"
-        "如果有，只输出一条精简的中文记忆内容（用第三人称、带双方称呼，不含「用户/机器人」通称）；"
+        "判断下面这条用户消息里，是否包含对方要求你一直记住的内容："
+        "比如「记住/记一下 xxx」「我们约定/说好 xxx」「别忘了 xxx」「以后想一起/下次 xxx」、"
+        "或明显希望你长期记住的事实、偏好。\n"
+        "如果有，只输出一行 JSON：{\"content\": \"精简的中文记忆内容（第三人称、带双方称呼，"
+        "不含「用户/机器人」通称）\", \"memory_type\": \"promise|preference|fact|note\"}——"
+        "约定/承诺用 promise，偏好用 preference，单纯事实用 fact，备注用 note。\n"
         "如果没有，只输出空字符串。不要任何解释或标记。\n\n"
         f"用户消息：{text.strip()}"
     )

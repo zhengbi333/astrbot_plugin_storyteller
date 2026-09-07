@@ -26,32 +26,44 @@ async def _http_get_json(url: str, *, headers: dict[str, str], timeout: int = 15
         return None
 
 
-async def _http_post_json(url: str, *, headers: dict[str, str], payload: dict, timeout: int = 15) -> Any:
-    try:
-        import aiohttp
+async def _http_post_json(url: str, *, headers: dict[str, str], payload: dict, timeout: int = 20) -> Any:
+    """POST 并解析 JSON；非 200 抛出带状态码的异常（0.189：失败可见，不再静默返回 None）。
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=timeout) as resp:
-                return await resp.json()
-    except Exception:
-        return None
+    参考 AstrBot 主程序搜索工具的做法：搜索失败要让上层知道原因，
+    会话搜索才能如实转述「没查到」，而不是让对话模型凭空编。
+    """
+    import aiohttp
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload, timeout=timeout) as resp:
+            if resp.status != 200:
+                reason = await resp.text()
+                raise RuntimeError(f"HTTP {resp.status}: {reason[:200]}")
+            return await resp.json()
 
 
-async def search_web(plugin: Any, query: str) -> list[dict[str, str]]:
-    """搜索网页，返回 [{title, url, snippet}]。"""
+async def search_web(plugin: Any, query: str, count: int | None = None) -> tuple[list[dict[str, str]], str]:
+    """搜索网页，返回 (results, answer)。
+
+    - results: [{title, url, snippet}]；
+    - answer: 引擎直接生成的答案（Tavily include_answer），可能为空串。
+    """
     if not query or not query.strip():
-        return []
+        return [], ""
     config = plugin.config
     engine = str(config.get("search.engine", "tavily") or "tavily").strip().lower()
     api_key = str(config.get("search.api_key", "") or "").strip()
-    count = max(1, min(10, config.int("search.result_count", 3)))
+    if count is None:
+        count = max(1, min(10, config.int("search.result_count", 3)))
+    else:
+        count = max(1, min(10, count))
     if not api_key:
-        return []
+        return [], ""
     if engine == "bing":
-        return await _bing_search(api_key, query, count)
+        return await _bing_search(api_key, query, count), ""
     if engine == "tavily":
         return await _tavily_search(api_key, query, count)
-    return []
+    return [], ""
 
 
 async def _bing_search(api_key: str, query: str, count: int) -> list[dict[str, str]]:
@@ -62,13 +74,17 @@ async def _bing_search(api_key: str, query: str, count: int) -> list[dict[str, s
     return _parse_search_results(data, count)
 
 
-async def _tavily_search(api_key: str, query: str, count: int) -> list[dict[str, str]]:
+async def _tavily_search(api_key: str, query: str, count: int) -> tuple[list[dict[str, str]], str]:
+    """Tavily 搜索。payload 带 include_answer：引擎直接给出答案，供归纳失败时兜底。"""
     data = await _http_post_json(
         "https://api.tavily.com/search",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        payload={"query": query, "max_results": count},
+        payload={"query": query, "max_results": count, "include_answer": True},
     )
+    answer = ""
     results = data.get("results") if isinstance(data, dict) else None
+    if isinstance(data, dict):
+        answer = str(data.get("answer") or "").strip()
     out: list[dict[str, str]] = []
     if isinstance(results, list):
         for r in results[:count]:
@@ -80,7 +96,7 @@ async def _tavily_search(api_key: str, query: str, count: int) -> list[dict[str,
                         "snippet": str(r.get("content") or r.get("snippet") or "")[:400],
                     }
                 )
-    return out
+    return out, answer
 
 
 def _parse_search_results(data: Any, count: int) -> list[dict[str, str]]:
@@ -160,11 +176,11 @@ async def think(plugin: Any, *, topic: str = "") -> str:
     return await generate_text(plugin, "think", prompt, task="think")
 
 
-async def search_and_think(plugin: Any, query: str) -> dict[str, Any]:
+async def search_and_think(plugin: Any, query: str, count: int | None = None) -> dict[str, Any]:
     """搜索网页并用搜索结果整理成一段可分享的见闻。"""
-    results = await search_web(plugin, query)
-    if not results:
-        return {"query": query, "results": [], "note": ""}
+    results, answer = await search_web(plugin, query, count)
+    if not results and not answer:
+        return {"query": query, "results": [], "note": "", "answer": ""}
     lines = "\n".join(f"- {r['title']}: {r['snippet']}" for r in results)
     prompt = (
         "下面是刚搜索到的一些网页结果。请把它们整理成一句自然的、可以主动分享给别人的见闻，"
@@ -172,7 +188,10 @@ async def search_and_think(plugin: Any, query: str) -> dict[str, Any]:
         + lines
     )
     note = await generate_text(plugin, "search", prompt, task="search")
-    return {"query": query, "results": results, "note": note}
+    if not note and answer:
+        # 归纳模型没吐出内容时，用引擎直接给的答案兜底（Tavily include_answer）
+        note = answer
+    return {"query": query, "results": results, "note": note, "answer": answer}
 
 
 async def browse(plugin: Any, *, force: bool = False) -> dict[str, Any]:
