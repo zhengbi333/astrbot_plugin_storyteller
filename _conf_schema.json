@@ -1212,6 +1212,42 @@
         "type": "int",
         "default": 0,
         "hint": "每天最多主动发几次表情包（0=不限）；已有的概率闸与语境判定仍在。"
+      },
+      "schedule_edit_daily": {
+        "description": "「改日程/记规划」每日上限",
+        "type": "int",
+        "default": 0,
+        "hint": "每天最多改几次日程或记几条未来规划（0=不限）。"
+      },
+      "outfit_change_daily": {
+        "description": "「换穿搭/添衣」每日上限",
+        "type": "int",
+        "default": 0,
+        "hint": "每天最多换几次穿搭或添几件衣服（0=不限）。"
+      },
+      "proactive_schedule_daily": {
+        "description": "「记下答应的事」每日上限",
+        "type": "int",
+        "default": 0,
+        "hint": "每天最多记几条承诺（0=不限）；记下的承诺由主动对话链路自然兑现。"
+      },
+      "mood_note_daily": {
+        "description": "「情绪起伏」每日上限",
+        "type": "int",
+        "default": 8,
+        "hint": "每天最多让情绪随对话起伏几次（0=不限）；防止情绪被频繁拉动。"
+      },
+      "share_inner_daily": {
+        "description": "「分享梦/见闻/日记」每日上限",
+        "type": "int",
+        "default": 0,
+        "hint": "每天最多主动分享几次（0=不限）；同一条内容另有 6 小时冷却，避免反复念叨。"
+      },
+      "history_lookup_daily": {
+        "description": "「翻聊天记录」每日上限",
+        "type": "int",
+        "default": 0,
+        "hint": "每天最多翻几次最近的对话记录（0=不限）。"
       }
     }
   }

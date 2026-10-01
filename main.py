@@ -218,6 +218,7 @@ class StorytellerPlugin(Star):
         self._inflight: dict[str, dict[str, Any]] = {}
         self._silence_streak: dict[str, int] = {}  # 0.195：连续沉默计数（防止判定误伤导致一直不理人）
         self._cap_usage: dict[str, int] = {}       # 0.197：能力每日用量（key = "能力:日期"）
+        self._cap_shared: dict[str, float] = {}    # 0.197：能力分享冷却（分享内心：同一条不重复念叨）
         try:
             self._migrate_intercept_template()
         except Exception:
@@ -3140,6 +3141,148 @@ class StorytellerPlugin(Star):
         import json as _json
 
         return _json.dumps(self.schedule_store.load().get("future", []), ensure_ascii=False)
+
+    # ------------------------------------------------------------ 能力工具（0.197，主链模式）
+    # 与「接管改换」的文本协议共用同一套实现（capabilities.dispatch）——两条链路行为一致、只换传输层。
+    # 返回统一 JSON（含 next_hint：告诉模型下一句该怎么说；失败时不许谎称已做）。
+
+    async def _cap_tool(self, event: AstrMessageEvent, name: str, kwargs: dict) -> str:
+        """能力工具的公共入口：分发 + JSON 化 + 异常兜底。"""
+        import json as _json
+
+        try:
+            result = await cap_dispatch(self, event, name, dict(kwargs or {}))
+        except Exception as exc:
+            result = {"ok": False, "status": "error", "message": f"执行异常：{exc}"}
+        return _json.dumps(result, ensure_ascii=False)
+
+    @filter.llm_tool(name="story_memory_write")
+    async def story_memory_write_tool(self, event: AstrMessageEvent, **kwargs: Any) -> str:
+        """把对方要你长期记住的内容写进长期记忆。
+
+        当对方说「记住/记一下/别忘了/我们约定…」，或这条信息对以后相处确有长期价值时调用。
+        只有返回 ok=true 才算真的存下来了；失败时必须如实说明没记住，不许口头承诺已保存。
+
+        Args:
+            content(string): 要记住的内容（第三人称、一句精简中文）。
+            type(string): fact|preference|promise|todo，默认 fact。
+        """
+        return await self._cap_tool(event, "memory_write", kwargs)
+
+    @filter.llm_tool(name="story_memory_recall")
+    async def story_memory_recall_tool(self, event: AstrMessageEvent, **kwargs: Any) -> str:
+        """检索你和对方过去的长期记忆（回忆往事）。
+
+        当对方问「还记得…吗」、或你需要确认以前的事实时调用；没有结果时如实说记不清，别编造。
+
+        Args:
+            query(string): 要回忆的关键词或问题。
+            top_k(number): 可选，返回条数，默认 5。
+        """
+        return await self._cap_tool(event, "memory_recall", kwargs)
+
+    @filter.llm_tool(name="story_web_lookup")
+    async def story_web_lookup_tool(self, event: AstrMessageEvent, **kwargs: Any) -> str:
+        """联网搜索当前信息（价格/新闻/事实核对），拿到可依据的要点。
+
+        当对方要你「查一下/搜一下」，或你需要外部事实才能回答时调用；搜不到就如实说没查到。
+
+        Args:
+            query(string): 搜索词。
+        """
+        return await self._cap_tool(event, "web_lookup", kwargs)
+
+    @filter.llm_tool(name="story_emoji_send")
+    async def story_emoji_send_tool(self, event: AstrMessageEvent, **kwargs: Any) -> str:
+        """挑一张表情包随回复发出（想表达情绪时用）。
+
+        用户明确要表情包、或此刻情绪确实适合配一张时调用；对方说过不想看表情包时不要调用。
+
+        Args:
+            category(string): 可选，分类标题；不给则用第一个有图的分类。
+        """
+        return await self._cap_tool(event, "emoji_send", kwargs)
+
+    @filter.llm_tool(name="story_photo_take")
+    async def story_photo_take_tool(self, event: AstrMessageEvent, **kwargs: Any) -> str:
+        """画一张图（或角色自拍）并直接发给对方。
+
+        对方想看画面、或你想分享眼前景象时调用；生成会消耗配额，别频繁调用。
+        只有返回 ok=true 才算真的发出去了，失败时如实说没拍成，不许说「我发给你了」。
+
+        Args:
+            prompt(string): 画面描述（谁/在哪/在做什么）。
+            selfie(boolean): 可选，true 表示角色本人出镜（自拍）。
+        """
+        return await self._cap_tool(event, "photo_take", kwargs)
+
+    @filter.llm_tool(name="story_schedule_edit")
+    async def story_schedule_edit_tool(self, event: AstrMessageEvent, **kwargs: Any) -> str:
+        """改「我」当天某个时段的安排，或记一条未来规划。
+
+        对方给你安排了事、或计划有变时调用；原安排会自动转入延误池。
+
+        Args:
+            action(string): replace（改当天某时段）| future（未来规划）。
+            start(string): replace 用，时段起点 HH:MM。
+            activity(string): 做什么。
+            date(string): future 可选，大致日期。
+            note(string): 可选备注。
+        """
+        return await self._cap_tool(event, "schedule_edit", kwargs)
+
+    @filter.llm_tool(name="story_outfit_change")
+    async def story_outfit_change_tool(self, event: AstrMessageEvent, **kwargs: Any) -> str:
+        """换「我」当前的穿搭（从衣柜里选），或往衣柜里添一件新衣服。
+
+        Args:
+            items(array): 衣物名列表（从衣柜现有衣物里选）。
+            add_item(string): 可选，往衣柜添一件（如对方送你的衣服）。
+            note(string): 可选备注。
+        """
+        return await self._cap_tool(event, "outfit_change", kwargs)
+
+    @filter.llm_tool(name="story_proactive_schedule")
+    async def story_proactive_schedule_tool(self, event: AstrMessageEvent, **kwargs: Any) -> str:
+        """记下你答应对方的事（晚点回访/以后一起做），之后由主动对话链路自然兑现。
+
+        你说出「我晚点找你/明天告诉你」这类承诺时调用——这样承诺才算数。
+
+        Args:
+            what(string): 答应的事。
+            when(string): 可选，大约什么时候（如「今晚」「周末」）。
+        """
+        return await self._cap_tool(event, "proactive_schedule", kwargs)
+
+    @filter.llm_tool(name="story_mood_note")
+    async def story_mood_note_tool(self, event: AstrMessageEvent, **kwargs: Any) -> str:
+        """让情绪随这轮对话自然起伏（幅度很小，像真人被一句话影响心情）。
+
+        Args:
+            direction(string): up（变好）| down（变差）。
+            reason(string): 可选，一句原因。
+        """
+        return await self._cap_tool(event, "mood_note", kwargs)
+
+    @filter.llm_tool(name="story_share_inner")
+    async def story_share_inner_tool(self, event: AstrMessageEvent, **kwargs: Any) -> str:
+        """想起自己的梦 / 刷到的见闻 / 写的日记，想跟对方说一句时调用。
+
+        同一条内容有冷却；没有内容时如实说没有，别编一个梦出来。
+
+        Args:
+            kind(string): dream（梦）| sighting（见闻）| diary（日记）。
+        """
+        return await self._cap_tool(event, "share_inner", kwargs)
+
+    @filter.llm_tool(name="story_history_lookup")
+    async def story_history_lookup_tool(self, event: AstrMessageEvent, **kwargs: Any) -> str:
+        """翻你和对方最近的聊天记录（想确认「之前聊过什么」时用）。
+
+        Args:
+            limit(number): 可选，条数，默认 10。
+        """
+        return await self._cap_tool(event, "history_lookup", kwargs)
 
     @staticmethod
     def _safe_call(event: Any, name: str) -> str:

@@ -196,6 +196,239 @@ async def _impl_emoji_send(plugin: Any, event: Any, payload: dict) -> dict[str, 
             "next_hint": "文字照常自然说，表情包会随消息一起发出去。"}
 
 
+async def _impl_photo_take(plugin: Any, event: Any, payload: dict) -> dict[str, Any]:
+    """画/拍一张图并直接发给对方（模型主动）。"""
+    desc = str(payload.get("prompt") or "").strip()
+    if not desc:
+        return {"ok": False, "status": "error", "message": "prompt 不能为空"}
+    if bool(payload.get("selfie")):
+        desc = f"{desc}（角色本人的自拍/出镜）"
+    try:
+        ok, why = await plugin.image_gen.can_generate()
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": f"生图不可用：{exc}"}
+    if not ok:
+        return {
+            "ok": False, "status": "unavailable", "message": why,
+            "next_hint": "如实说现在没法拍/画，别声称已经发图。",
+        }
+    try:
+        prompt = plugin._compose_image_prompt(desc)
+        path, note = await plugin.image_gen.generate(prompt, kind="text2img")
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": f"生成失败：{exc}",
+                "next_hint": "如实说没画出来。"}
+    if not path:
+        return {"ok": False, "status": "error", "message": note or "生成失败",
+                "next_hint": "如实说没画出来。"}
+    import asyncio as _aio
+
+    session_id = str(getattr(event, "unified_msg_origin", "") or "")
+    caption = str(plugin.config.get("image.caption", "") or "").strip()
+    try:
+        from astrbot.api.event import MessageChain
+
+        sender = getattr(plugin.context, "send_message", None)
+        if callable(sender) and session_id:
+            chain = MessageChain()
+            chain.file_image(path)
+            if caption:
+                chain.message(caption)
+            await sender(session_id, chain)
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": f"发送失败：{exc}",
+                "next_hint": "如实说图没发出去。"}
+    try:
+        plugin._note_bot_reply(event, f"[图片] {caption}（模型主动：{desc[:60]}）")
+    except Exception:
+        pass
+    await _aio.sleep(0)
+    return {
+        "ok": True, "status": "ok", "sent": True, "path": path, "caption": caption,
+        "next_hint": "图已经发出去了：接下来只用一两句自然的话接住，不要复述画面、别说「我发给你」。",
+    }
+
+
+async def _impl_schedule_edit(plugin: Any, event: Any, payload: dict) -> dict[str, Any]:
+    """改当天日程某时段，或记一条未来规划。"""
+    action = str(payload.get("action") or "replace").strip().lower()
+    activity = str(payload.get("activity") or "").strip()
+    if action in ("future", "plan") or payload.get("date"):
+        if not activity:
+            return {"ok": False, "status": "error", "message": "activity 不能为空"}
+        try:
+            plugin.schedule_store.add_future(
+                activity=activity,
+                date=str(payload.get("date") or "").strip(),
+                note=str(payload.get("note") or "").strip(),
+            )
+        except Exception as exc:
+            return {"ok": False, "status": "error", "message": f"记未来规划失败：{exc}"}
+        return {"ok": True, "status": "ok", "activity": activity, "kind": "future",
+                "next_hint": "记下了，自然应一声就好（别把日程念一遍）。"}
+    start = str(payload.get("start") or "").strip()
+    if not start or not activity:
+        return {"ok": False, "status": "error", "message": "需要 start（如 14:00）与 activity"}
+    try:
+        result = plugin.schedule_store.replace(
+            start=start, activity=activity,
+            note=str(payload.get("note") or "").strip(), move_original=True,
+        )
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": f"改日程失败：{exc}"}
+    return {"ok": True, "status": "ok", "start": start, "activity": activity,
+            "moved_original": bool((result or {}).get("moved")) if isinstance(result, dict) else None,
+            "next_hint": "改好了：自然说一句就行，别把整张日程表念出来。"}
+
+
+async def _impl_outfit_change(plugin: Any, event: Any, payload: dict) -> dict[str, Any]:
+    """换当前穿搭，或往衣柜里添一件。"""
+    add_item = str(payload.get("add_item") or "").strip()
+    if add_item:
+        try:
+            plugin.wardrobe_store.add_item(add_item)
+        except Exception as exc:
+            return {"ok": False, "status": "error", "message": f"添衣柜失败：{exc}"}
+        return {"ok": True, "status": "ok", "added": add_item,
+                "next_hint": "可以自然提一句收进衣柜了。"}
+    items = payload.get("items")
+    if isinstance(items, str):
+        items = [x.strip() for x in items.replace("、", ",").split(",") if x.strip()]
+    if not isinstance(items, list) or not items:
+        return {"ok": False, "status": "error", "message": "items（衣物名列表）不能为空"}
+    names = [str(x).strip() for x in items if str(x).strip()][:8]
+    try:
+        plugin.wardrobe_store.set_outfit(names, note=str(payload.get("note") or "").strip())
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": f"换穿搭失败：{exc}"}
+    return {"ok": True, "status": "ok", "items": names,
+            "next_hint": "换好了：自然带一句（比如照镜子式的反应），别逐件念。"}
+
+
+async def _impl_proactive_schedule(plugin: Any, event: Any, payload: dict) -> dict[str, Any]:
+    """记下一件「我答应过要回访/以后要一起做」的事，交给既有由头链路去兑现。"""
+    what = str(payload.get("what") or "").strip()
+    if not what:
+        return {"ok": False, "status": "error", "message": "what 不能为空"}
+    when = str(payload.get("when") or "").strip()
+    bridge = plugin._get_memory_bridge()
+    if bridge is None:
+        return {"ok": False, "status": "unavailable", "message": "记忆插件未联动",
+                "next_hint": "别在回复里给承诺（记不下就别说会做）。"}
+    from .memory import build_session_context
+
+    content = f"我答应对方：{what}" + (f"（大约 {when}）" if when else "")
+    try:
+        mid = await bridge.add_memory(
+            content=content, memory_type="promise",
+            session_context=build_session_context(event), importance=0.75,
+            source_plugin="astrbot_plugin_storyteller",
+        )
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": f"写入失败：{exc}",
+                "next_hint": "没能记下，别在回复里承诺。"}
+    if not mid:
+        return {"ok": False, "status": "error", "message": "写入未返回 id",
+                "next_hint": "没能记下，别在回复里承诺。"}
+    if when:
+        try:
+            plugin.schedule_store.add_future(activity=f"回访：{what}", date=when, note="答应过对方的事")
+        except Exception:
+            pass
+    return {"ok": True, "status": "ok", "content": content,
+            "next_hint": "已经替你记下：回复里可以说「我会记着」，但别把时间说得太满。"}
+
+
+async def _impl_mood_note(plugin: Any, event: Any, payload: dict) -> dict[str, Any]:
+    """让情绪随对话自然起伏（模型自述式微调，幅度受上限约束）。"""
+    direction = str(payload.get("direction") or "up").strip().lower()
+    reason = str(payload.get("reason") or "").strip()[:40]
+    up = direction in ("up", "good", "positive", "好", "上")
+    try:
+        from .presence import clamp, stain
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": f"状态模块不可用：{exc}"}
+    try:
+        store = plugin.presence_store
+        presence = store.load(with_decay=False)
+        delta = 0.05 if up else -0.05
+        presence["tone"] = clamp(float(presence.get("tone", 0.0)) + delta, -1.0, 1.0)
+        presence["tempo"] = clamp(float(presence.get("tempo", 0.0)) + delta * 0.6, -1.0, 1.0)
+        presence = stain(presence, "分享" if up else "低落", text=reason or ("聊得开心" if up else "有点闷"))
+        import time as _t
+
+        presence["updated_at"] = _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime())
+        store.save(presence)
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": f"状态更新失败：{exc}"}
+    return {"ok": True, "status": "ok", "direction": "up" if up else "down",
+            "next_hint": "心情已经变了：可以自然带出一点情绪，但别解释机制。"}
+
+
+async def _impl_share_inner(plugin: Any, event: Any, payload: dict) -> dict[str, Any]:
+    """分享自己的梦 / 见闻 / 日记（同一条有冷却，避免反复念叨）。"""
+    import time as _t
+
+    kind = str(payload.get("kind") or "sighting").strip().lower()
+    if kind in ("dream", "梦"):
+        kind = "dream"
+    elif kind in ("diary", "日记"):
+        kind = "diary"
+    else:
+        kind = "sighting"
+    text = ""
+    try:
+        if kind == "diary":
+            entries = plugin.diary_store.entries() or []
+            if entries:
+                last = entries[-1]
+                text = str(last.get("content") or last.get("text") or "").strip() if isinstance(last, dict) else str(last)
+        else:
+            key = "dreams" if kind == "dream" else "sightings"
+            items = (plugin.mind_store.all() or {}).get(key) or []
+            if items:
+                first = items[0]
+                text = str(first.get("text") or "") if isinstance(first, dict) else str(first)
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": f"读取失败：{exc}"}
+    if not text:
+        label = {"dream": "最近没做梦", "diary": "最近没写日记", "sighting": "最近没刷到什么"}[kind]
+        return {"ok": True, "status": "empty", "message": label,
+                "next_hint": f"如实说{label}（别编一个梦/见闻出来）。"}
+    # 冷却：同一条 6 小时内不重复分享
+    try:
+        key = f"{kind}:{hash(text) & 0xFFFFFF}"
+        last_at = float(plugin._cap_shared.get(key, 0) or 0)
+        if _t.time() - last_at < 6 * 3600:
+            return {"ok": False, "status": "cooling",
+                    "message": "这条刚分享过",
+                    "next_hint": "别再提同一件事了，正常聊别的。"}
+        plugin._cap_shared[key] = _t.time()
+    except Exception:
+        pass
+    return {"ok": True, "status": "ok", "kind": kind, "excerpt": text[:300],
+            "next_hint": "用你自己的话随口提起（一两句，别整段念），像人忽然想到什么。"}
+
+
+async def _impl_history_lookup(plugin: Any, event: Any, payload: dict) -> dict[str, Any]:
+    """翻自己和对方最近的聊天记录（看历史）。"""
+    try:
+        limit = payload.get("limit")
+        limit = max(1, min(30, int(limit))) if limit is not None else 10
+    except Exception:
+        limit = 10
+    session_id = str(getattr(event, "unified_msg_origin", "") or "")
+    try:
+        text = plugin._recent_timeline_text(session_id, limit=limit)
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": f"读取失败：{exc}"}
+    if not text:
+        return {"ok": True, "status": "empty", "message": "没有更早的记录",
+                "next_hint": "如实说记不太清之前聊过什么。"}
+    return {"ok": True, "status": "ok", "timeline": text[:800],
+            "next_hint": "像人回忆那样自然提起（别整段复述记录）。"}
+
+
 # ---------------------------------------------------------------- 注册表
 
 CAPABILITIES: dict[str, Capability] = {}
@@ -243,6 +476,77 @@ _register(Capability(
     example='[DO:emoji_send]{"category":"表达轻微吐槽"}',
     daily_limit_key="capabilities.emoji_send_daily",
     impl=_impl_emoji_send,
+))
+
+_register(Capability(
+    name="photo_take",
+    title="画/拍一张图发过去",
+    description="画一张图（或角色自拍）并直接发给对方——想分享眼前画面、或对方想看时用",
+    params={"prompt": "画面描述（谁/在哪/在做什么）", "selfie": "可选 true=角色本人出镜"},
+    example='[DO:photo_take]{"prompt":"窗台上晒太阳的白猫，水彩风"}',
+    daily_limit_key="image.max_daily",
+    impl=_impl_photo_take,
+))
+
+_register(Capability(
+    name="schedule_edit",
+    title="改日程 / 记未来规划",
+    description="改当天某个时段的安排，或把一件以后要做的事记进未来规划",
+    params={"action": "replace（改当天某时段）| future（未来规划）", "start": "replace 用，如 14:00",
+            "activity": "做什么", "date": "future 可选，如 周六/10-05", "note": "可选备注"},
+    example='[DO:schedule_edit]{"action":"replace","start":"20:00","activity":"和对方一起看动画"}',
+    daily_limit_key="capabilities.schedule_edit_daily",
+    impl=_impl_schedule_edit,
+))
+
+_register(Capability(
+    name="outfit_change",
+    title="换穿搭 / 添衣服",
+    description="换一身当前穿搭（从衣柜里选），或往衣柜里添一件新衣服",
+    params={"items": "衣物名列表（可传数组或逗号分隔）", "add_item": "可选，往衣柜添一件"},
+    example='[DO:outfit_change]{"items":["深灰毛衣","黑色牛仔裤"]}',
+    daily_limit_key="capabilities.outfit_change_daily",
+    impl=_impl_outfit_change,
+))
+
+_register(Capability(
+    name="proactive_schedule",
+    title="记下答应对方的事",
+    description="答应对方「晚点找你/以后一起做某事」时记下来，之后由主动对话链路自然兑现",
+    params={"what": "答应的事", "when": "可选，大约什么时候（如「今晚」「周末」）"},
+    example='[DO:proactive_schedule]{"what":"晚点把查到的资料整理给对方","when":"今晚"}',
+    daily_limit_key="capabilities.proactive_schedule_daily",
+    impl=_impl_proactive_schedule,
+))
+
+_register(Capability(
+    name="mood_note",
+    title="情绪随对话起伏",
+    description="这轮对话让你心情变好/变差时，让自己的情绪状态自然变化（幅度很小）",
+    params={"direction": "up=变好 | down=变差", "reason": "可选，一句原因"},
+    example='[DO:mood_note]{"direction":"up","reason":"被夸了"}',
+    daily_limit_key="capabilities.mood_note_daily",
+    impl=_impl_mood_note,
+))
+
+_register(Capability(
+    name="share_inner",
+    title="分享梦 / 见闻 / 日记",
+    description="想起自己昨晚的梦、刚刷到的见闻或最近写的日记，想跟对方说一句时用",
+    params={"kind": "dream=梦 | sighting=见闻 | diary=日记"},
+    example='[DO:share_inner]{"kind":"dream"}',
+    daily_limit_key="capabilities.share_inner_daily",
+    impl=_impl_share_inner,
+))
+
+_register(Capability(
+    name="history_lookup",
+    title="翻聊天记录",
+    description="想确认「之前聊过什么」时翻最近的对话记录（不是长期记忆，是最近的原话）",
+    params={"limit": "可选，默认 10 条"},
+    example='[DO:history_lookup]{"limit":10}',
+    daily_limit_key="capabilities.history_lookup_daily",
+    impl=_impl_history_lookup,
 ))
 
 
