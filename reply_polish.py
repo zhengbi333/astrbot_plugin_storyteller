@@ -82,7 +82,8 @@ class ReplyPolisher:
             anchors = self._plugin._anchor_values(event)
             anchors["current_text"] = str(getattr(event, "message_str", "") or "").strip()
             anchors["context"] = self._plugin._recent_timeline_text(
-                str(getattr(event, "unified_msg_origin", "") or ""), limit=3
+                str(getattr(event, "unified_msg_origin", "") or ""), limit=3,
+                persona_id=str(getattr(event, "_storyteller_memory_persona", "") or ""),
             )
             anchors["reply"] = raw
             # 0.158 空态防御（与接管同源）：润色提示词里"设定/语境"类锚为空时补明确占位，

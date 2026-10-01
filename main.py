@@ -538,6 +538,14 @@ class StorytellerPlugin(Star):
                 # 命令消息不介入；本插件不注入 → 恢复记忆插件自动注入
                 self._sync_memory_managed(False)
                 return
+            # 先解析当前人格，供生图、防认错、放行和接管共用同一隔离上下文。
+            bridge = self._get_memory_bridge()
+            resolver = getattr(bridge, "resolve_persona_for", None)
+            if callable(resolver):
+                try:
+                    event._storyteller_memory_persona = await resolver(self._session_ctx_dict(event))
+                except Exception:
+                    pass
             # 生图意图（0.148）：明确请求画图 → 直连生图并发送，不进入干预流程（独立于拦截总开关）
             if self.config.bool("image.enabled", True):
                 try:
@@ -907,7 +915,7 @@ class StorytellerPlugin(Star):
                 pass
         # 0.183：疑问式弱信号（好看吗/啥样…）→ 不硬生图，打「{生图意愿}」软标记给对话 LLM 自决
         try:
-            if self._image_wish_hint(event, text):
+            if await self._image_wish_hint(event, text):
                 return "", ""
         except Exception:
             pass
@@ -937,7 +945,11 @@ class StorytellerPlugin(Star):
         if not callable(getter):
             return ""
         exclude = str(exclude_text or "").strip()
-        events = getter(session_context={"session_id": session_id}, limit=int(limit) + 6) or []
+        ctx = {"session_id": session_id}
+        resolver = getattr(bridge, "resolve_persona_for", None)
+        if callable(resolver):
+            ctx["persona_id"] = await resolver(ctx)
+        events = getter(session_context=ctx, limit=int(limit) + 6) or []
         now = time.time()
         for ev in events:
             if not isinstance(ev, dict):
@@ -1125,7 +1137,7 @@ class StorytellerPlugin(Star):
             getter = getattr(bridge, "get_timeline", None)
             if callable(getter):
                 try:
-                    events = getter(session_context={"session_id": session_id}, limit=count) or []
+                    events = getter(session_context=self._session_ctx_dict(event), limit=count) or []
                     for ev in reversed(events if isinstance(events, list) else []):
                         if not isinstance(ev, dict):
                             continue
@@ -1372,7 +1384,7 @@ class StorytellerPlugin(Star):
         except Exception:
             values["relationship"] = ""
         try:
-            values["memory"] = self._recent_memory_hint(limit=6)
+            values["memory"] = self._recent_memory_hint(limit=6, session_context=self._session_ctx_dict(event))
             values["weather"] = str(self.config.get("presence.weather", "") or "").strip()
             sightings = self.mind_store.all().get("sightings") or []
             values["mind"] = str(sightings[0].get("text") or "")[:120] if sightings else ""
@@ -1434,7 +1446,7 @@ class StorytellerPlugin(Star):
             return "私聊"
         return "私聊" if not uid else "对话"
 
-    def _recent_timeline_text(self, uid: str, limit: int = 4) -> str:
+    def _recent_timeline_text(self, uid: str, limit: int = 4, *, persona_id: str = "") -> str:
         """取该会话最近对话（【为你篆刻的历史】时间线）作为「{上下文}」注入内容。
 
         0.172：渲染时**按时间正序（旧→新）**，并给每行标注说话人（对方/我/系统/昵称）——
@@ -1452,7 +1464,7 @@ class StorytellerPlugin(Star):
             if not callable(getter):
                 return ""
             parts = str(uid or "").split(":")
-            ctx: dict = {"session_id": str(uid or ""), "platform": parts[0] if parts else ""}
+            ctx: dict = {"session_id": str(uid or ""), "platform": parts[0] if parts else "", "persona_id": persona_id}
             events = list(getter(session_context=ctx, limit=limit) or [])
             from .timeline_filter import is_llm_context_event
 
@@ -1508,16 +1520,12 @@ class StorytellerPlugin(Star):
 
     def _session_ctx_dict(self, event: AstrMessageEvent) -> dict:
         """由事件构造记忆插件需要的会话上下文 dict（尽力而为）。"""
-        uid = str(getattr(event, "unified_msg_origin", "") or "")
-        parts = uid.split(":") if uid else []
-        sender = extract_sender(event)
-        return {
-            "session_id": uid,
-            "platform": parts[0] if parts else "",
-            "user_id": sender.get("user_id") or "",
-            "user_name": sender.get("user_name") or "",
-            "message_text": str(getattr(event, "message_str", "") or "")[:2000],
-        }
+        from .memory import build_session_context
+
+        ctx = build_session_context(event)
+        ctx["persona_id"] = str(getattr(event, "_storyteller_memory_persona", "") or "")
+        ctx["message_text"] = str(getattr(event, "message_str", "") or "")[:2000]
+        return ctx
 
     def _relation_memory_summary(self, event: AstrMessageEvent) -> str:
         """联动读取【为你篆刻的历史】的「约定/偏好/关系」记忆，作为 {关系} 锚的摘要。
@@ -1855,7 +1863,8 @@ class StorytellerPlugin(Star):
             anchors = self._anchor_values(event)
             anchors["current_text"] = prompt or user_text or "（对方没有说话）"
             anchors["context"] = self._recent_timeline_text(
-                session_id, limit=max(2, min(12, self.config.int("intercept.context_count", 4)))
+                session_id, limit=max(0, min(12, self.config.int("intercept.context_count", 4))),
+                persona_id=str(getattr(event, "_storyteller_memory_persona", "") or ""),
             )
             # 0.163：时间线可能已含本轮消息（防抖收集时就写入了记忆插件时间线）——剔除，
             # 否则"你好？"在 {当前说话}/{上下文}/【本次对话】里重复多次，模型以为对方在重复发问
@@ -1975,7 +1984,8 @@ class StorytellerPlugin(Star):
             # 由「拦＆改」统一整合发送（参考插件：所有功能注入完成后一次性发送）
             anchors["current_text"] = prompt or user_text or "（对方没有说话）"
             anchors["context"] = self._recent_timeline_text(
-                session_id, limit=max(2, min(12, self.config.int("intercept.context_count", 4)))
+                session_id, limit=max(0, min(12, self.config.int("intercept.context_count", 4))),
+                persona_id=str(getattr(event, "_storyteller_memory_persona", "") or ""),
             )
             # 0.163：时间线可能已含本轮消息（防抖收集时就写入了记忆插件时间线）——剔除，
             # 否则"你好？"在 {当前说话}/{上下文}/【本次对话】里重复多次，模型以为对方在重复发问
@@ -2172,7 +2182,7 @@ class StorytellerPlugin(Star):
                                     "[Storyteller] 能力未成功: %s → %s（%s）",
                                     _name, _res.get("status"), str(_res.get("message"))[:60],
                                 )
-                        content = strip_marks(content) or content
+                        content = strip_marks(content)
                         _extra = cap_format(_results)
                         logger.info(
                             "[Storyteller] 能力执行（第%s轮）: %s",
@@ -2189,7 +2199,7 @@ class StorytellerPlugin(Star):
                         _again = True
                     else:
                         # 超轮次：剔除标记，直接发当前内容（不留 [DO:...] 给用户）
-                        content = strip_marks(content) or content
+                        content = strip_marks(content)
                         logger.info("[Storyteller] 能力执行达上限（%s），直接发送当前回复", cap_max_rounds)
                 # 0.194：生成期间对方又发了消息 → 作废本轮结果、合并重新理解（受 max_restarts 限制）
                 _pend = self._inflight_take_pending(session_id)
@@ -2318,7 +2328,7 @@ class StorytellerPlugin(Star):
             # 0.197 保险：最终文本再剔一次能力标记（任何分支都不该把 [DO:...] 发给用户）
             if content:
                 try:
-                    content = strip_marks(content) or content
+                    content = strip_marks(content)
                 except Exception:
                     pass
             sent_ok = False
@@ -2341,7 +2351,9 @@ class StorytellerPlugin(Star):
                         sender = getattr(self.context, "send_message", None)
                         if callable(sender) and session_id:
                             chain = self._build_reply_chain(content)
-                            await sender(session_id, chain)
+                            result = await sender(session_id, chain)
+                            if result is False:
+                                raise RuntimeError("发送接口返回失败")
                             sent_ok = True
                             # 接管绕过主链：把 Bot 回复回填记忆插件时间线，
                             # 否则记忆插件 on_llm_response 记录不到（时间线缺 Bot 侧）
@@ -2475,47 +2487,80 @@ class StorytellerPlugin(Star):
             messages.append({"role": "system", "content": str(final_system)})
         messages.append({"role": "user", "content": str(call_prompt)})
         rounds = max(0, min(4, int(max_rounds or 0)))
+        allowed = {str((tool.get("function") or {}).get("name") or "") for tool in tools}
+        results = []
+        marks = []
+        input_other = input_cached = output = 0
         resp: Any = None
         for i in range(rounds + 1):
-            resp = await chat_with_tools(
-                provider, self.config,
-                messages=messages, tools=tools,
-                timeout=90, disable_thinking=True,
-            )
+            try:
+                resp = await chat_with_tools(
+                    provider, self.config, messages=messages, tools=tools,
+                    timeout=90, disable_thinking=True,
+                    tool_choice="none" if i >= rounds else "auto",
+                )
+            except Exception:
+                if not results:
+                    raise
+                # 已执行的动作不能因后续生成失败而丢失结果，更不能无上下文重做。
+                resp = await chat_text(
+                    provider, self.config,
+                    prompt=f"{call_prompt}\n\n{cap_format(results)}",
+                    system_prompt=final_system if accept_sys else "",
+                    session_id=f"storyteller_takeover:{getattr(event, 'unified_msg_origin', '')}",
+                    _disable_thinking=True,
+                )
+            usage = getattr(resp, "usage", None)
+            input_other += int(getattr(usage, "input_other", 0) or getattr(resp, "est_input_tokens", 0) or 0)
+            input_cached += int(getattr(usage, "input_cached", 0) or 0)
+            output += int(getattr(usage, "output", 0) or 0)
             calls = list(getattr(resp, "tool_calls", None) or [])
+            state = self._inflight_state(str(getattr(event, "unified_msg_origin", "") or ""))
+            if state and state.get("pending"):
+                # 用户已补充新消息：先回外层合并，尚未执行的动作不再继续。
+                resp.completion_text = str(getattr(resp, "completion_text", "") or "") or "（重新理解补充消息）"
+                break
             if not calls:
-                return resp
-            logger.info(
-                "[Storyteller] 原生工具调用（第%s轮）: %s",
-                i + 1, [str((c.get("function") or {}).get("name") or "") for c in calls][:4],
-            )
+                break
+            if i >= rounds:
+                resp.completion_text = "这次操作没有继续执行。" if not results else "刚才已经完成的操作保留了，后续暂时没能处理。"
+                break
             messages.append({
-                "role": "assistant",
-                "content": str(getattr(resp, "completion_text", "") or ""),
+                "role": "assistant", "content": str(getattr(resp, "completion_text", "") or ""),
                 "tool_calls": calls,
             })
-            for c in calls[:3]:  # 一轮最多执行 3 个，防跑飞
-                fn = c.get("function") or {}
+            for index, call in enumerate(calls):
+                fn = call.get("function") or {}
                 name = str(fn.get("name") or "")
-                raw = str(fn.get("arguments") or "{}")
                 try:
-                    payload = _json.loads(raw) if raw.strip().startswith("{") else {}
-                except Exception:
-                    payload = {}
-                if not isinstance(payload, dict):
-                    payload = {}
-                result = await cap_dispatch(self, event, cap_name_from_tool(name), payload)
-                logger.info(
-                    "[Storyteller] 原生工具结果: %s → %s%s",
-                    name, result.get("status"),
-                    (f"（{str(result.get('message'))[:40]}）" if not result.get("ok") else ""),
-                )
+                    payload = _json.loads(str(fn.get("arguments") or "{}"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("参数必须为对象")
+                except (ValueError, TypeError):
+                    payload = None
+                if index >= 3:
+                    result = {"ok": False, "status": "limited", "message": "本轮最多执行三个能力"}
+                elif name not in allowed:
+                    result = {"ok": False, "status": "forbidden", "message": "本轮未提供这个工具"}
+                elif payload is None:
+                    result = {"ok": False, "status": "error", "message": "工具参数不是有效 JSON 对象"}
+                else:
+                    result = await cap_dispatch(self, event, cap_name_from_tool(name), payload)
+                results.append(result)
+                mark = str(result.get("mark") or "")
+                if mark and mark not in marks:
+                    marks.append(mark)
+                # 每个 tool_call 都必须有回填，超额项返回拒绝结果而不是丢弃。
                 messages.append({
-                    "role": "tool",
-                    "tool_call_id": str(c.get("id") or ""),
-                    "content": _json.dumps(result, ensure_ascii=False)[:2000],
+                    "role": "tool", "tool_call_id": str(call.get("id") or ""),
+                    "content": _json.dumps(result, ensure_ascii=False, default=str),
                 })
-        return resp if resp is not None else types.SimpleNamespace(completion_text="", usage=None)
+        if resp is None:
+            resp = types.SimpleNamespace(completion_text="", usage=None)
+        text = str(getattr(resp, "completion_text", "") or "")
+        resp.completion_text = " ".join([text, *(mark for mark in marks if mark not in text)]).strip()
+        resp.usage = types.SimpleNamespace(input_other=input_other, input_cached=input_cached, output=output)
+        return resp
 
     def _text_chat_accepts_system_prompt(self, provider: Any) -> bool:
         """探测 provider.text_chat 是否接受 system_prompt 命名参数（兼容不同 AstrBot/provider 版本）。
@@ -3851,7 +3896,7 @@ class StorytellerPlugin(Star):
             echoes = self._presence_echoes_text(previous)
             memory_material = ""
             if event is not None and self.config.bool("presence.memory_drydock", False):
-                memory_material = self._recent_promise_hint(event)
+                memory_material = self._session_promise_hint(event)
             context = self._recent_context_hint(limit=3)
             prompt = build_presence_generate_prompt(
                 now=now, schedule=schedule_part, context=context,
@@ -3885,7 +3930,7 @@ class StorytellerPlugin(Star):
                     parts.append(f"{label}：{text[:50]}")
         return "；".join(parts)
 
-    def _recent_promise_hint(self, event: AstrMessageEvent) -> str:
+    def _session_promise_hint(self, event: AstrMessageEvent) -> str:
         """（可选心事素材）按当前会话取最近约定 top1；需已联动记忆插件，不走 embedding。"""
         bridge = self._get_memory_bridge()
         if bridge is None:
@@ -3907,7 +3952,7 @@ class StorytellerPlugin(Star):
             pass
         return ""
 
-    def _recent_memory_hint(self, limit: int = 4) -> str:
+    def _recent_memory_hint(self, limit: int = 4, *, session_context: dict | None = None) -> str:
         """取最近记忆作为状态演化的输入（约定/愿望/回想）。"""
         bridge = self._get_memory_bridge()
         if bridge is None:
@@ -3916,7 +3961,7 @@ class StorytellerPlugin(Star):
             lister = getattr(bridge, "list_recent_memories", None)
             if not callable(lister):
                 return ""
-            records = lister(session_context={}, limit=limit)
+            records = lister(session_context=session_context or {}, limit=limit)
             if not isinstance(records, list):
                 return ""
             items = []
@@ -3931,7 +3976,7 @@ class StorytellerPlugin(Star):
         except Exception:
             return ""
 
-    def _recent_promise_hint(self, limit: int = 3) -> str:
+    def _recent_promise_hint(self, limit: int = 3, *, session_context: dict | None = None) -> str:
         """只取记忆库里的「约定/承诺（promise）」类最近记忆。
 
         主动由头（记忆源/约定后续）专用：不混入偏好、身份等其它记忆——
@@ -3945,7 +3990,7 @@ class StorytellerPlugin(Star):
             lister = getattr(bridge, "list_recent_memories", None)
             if not callable(lister):
                 return ""
-            records = lister(session_context={}, limit=limit, memory_type="promise")
+            records = lister(session_context=session_context or {}, limit=limit, memory_type="promise")
             if not isinstance(records, list):
                 return ""
             items = []

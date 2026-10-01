@@ -153,15 +153,15 @@ class InspirationEngine:
         return ((self._meta.get("daypart_sent") or {}).get(day, {}).get(bucket, {}) or {}).get(user, 0)
 
     # ---- 汇集由头 ----
-    def collect(self) -> list[Inspiration]:
+    def collect(self, *, session_context: dict | None = None) -> list[Inspiration]:
         """全部今日由头（持续源 + 事件源 + 登记源）。"""
         out: list[Inspiration] = []
         try:
-            out.extend(self._from_persistent())
+            out.extend(self._from_persistent(session_context=session_context))
         except Exception as exc:
             logger.warning("[Storyteller] 由头-持续源失败: %s", exc)
         try:
-            out.extend(self._from_events())
+            out.extend(self._from_events(session_context=session_context))
         except Exception as exc:
             logger.warning("[Storyteller] 由头-事件源失败: %s", exc)
         try:
@@ -198,7 +198,7 @@ class InspirationEngine:
                 ins.state = "brewing"
         return out
 
-    def _from_persistent(self) -> list[Inspiration]:
+    def _from_persistent(self, *, session_context: dict | None = None) -> list[Inspiration]:
         """持续源：状态/日程/记忆/未完话题/见闻/梦。"""
         plugin = self._plugin
         out: list[Inspiration] = []
@@ -223,7 +223,7 @@ class InspirationEngine:
         # （不混入偏好/身份等其它记忆，避免把无关记忆错当成"说好的事"）
         try:
             getter = getattr(plugin, "_recent_promise_hint", None)
-            mem = getter(limit=4) if callable(getter) else ""
+            mem = getter(limit=4, session_context=session_context) if callable(getter) and session_context else ""
             if mem:
                 out.append(Inspiration("记忆", f"还记得约好的事：{mem[:120]}", importance=0.5))
         except Exception:
@@ -241,7 +241,7 @@ class InspirationEngine:
             pass
         return out
 
-    def _from_events(self) -> list[Inspiration]:
+    def _from_events(self, *, session_context: dict | None = None) -> list[Inspiration]:
         """事件源：早晚安 / 三餐 / 约定后续 / 生日（按需触发，克制）。"""
         plugin = self._plugin
         out: list[Inspiration] = []
@@ -265,7 +265,7 @@ class InspirationEngine:
         # 约定后续：只取「约定/承诺」类记忆（promise），其它记忆不得冒充约定
         try:
             getter = getattr(plugin, "_recent_promise_hint", None)
-            mem = getter(limit=3) if callable(getter) else ""
+            mem = getter(limit=3, session_context=session_context) if callable(getter) and session_context else ""
             if mem:
                 out.append(Inspiration("约定后续", f"之前说好/约好的事：{mem[:120]}", importance=0.6))
         except Exception:

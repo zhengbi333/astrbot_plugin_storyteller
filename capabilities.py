@@ -5,8 +5,8 @@
   主链工具注册与接管模式的声明段都从这里生成，避免"两处各写一份、行为分叉"；
 - **两种暴露方式**：
   1. 主链模式（放行 / 接管走主链）：由 AstrBot 注册为 LLM 工具，模型原生 function calling；
-  2. 接管改换：直连链路不带 tools，改为把能力清单写进 system 声明段，
-     模型输出 `[DO:能力名]{json}` 表达意愿，插件解析执行（0.196 确定的协议格式）；
+  2. 接管改换：优先原生工具循环；不支持时把能力清单写进 system 声明段，
+     模型输出 `[DO:能力名]{json}` 表达意愿，插件解析执行；
 - **结果统一结构**：{ok, status, message, next_hint}——`next_hint` 直接引导模型下一句怎么说
   （借鉴"失败可见/不谎称已做"的经验：只有真成功才允许说做到了）；
 - **去重**：本轮已通过能力执行的动作会登记到 event 上，供各预检测判断"这个动作已经有人做了"，
@@ -15,13 +15,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 # 协议：模型输出 [DO:能力名]{json}；解析后一定从可见文本里剔除
-DO_PATTERN = re.compile(r"\[DO:([a-zA-Z_][a-zA-Z0-9_]{1,40})\]\s*(\{[^{}]*\}|\[[^\[\]]*\])?")
+DO_PATTERN = re.compile(r"\[DO:([a-zA-Z_][a-zA-Z0-9_]{0,40})\]")
 
 
 @dataclass
@@ -202,6 +203,12 @@ async def _impl_photo_take(plugin: Any, event: Any, payload: dict) -> dict[str, 
     desc = str(payload.get("prompt") or "").strip()
     if not desc:
         return {"ok": False, "status": "error", "message": "prompt 不能为空"}
+    session_id = str(getattr(event, "unified_msg_origin", "") or "")
+    sender = getattr(plugin.context, "send_message", None)
+    if not callable(sender) or not session_id:
+        return {"ok": False, "status": "unavailable", "sent": False,
+                "message": "没有可用的发送接口或目标会话",
+                "next_hint": "图无法发送，别声称已经发出。"}
     if bool(payload.get("selfie")):
         desc = f"{desc}（角色本人的自拍/出镜）"
     try:
@@ -235,7 +242,9 @@ async def _impl_photo_take(plugin: Any, event: Any, payload: dict) -> dict[str, 
             chain.file_image(path)
             if caption:
                 chain.message(caption)
-            await sender(session_id, chain)
+            sent = await sender(session_id, chain)
+            if sent is False:
+                raise RuntimeError("发送接口返回失败")
     except Exception as exc:
         return {"ok": False, "status": "error", "message": f"发送失败：{exc}",
                 "next_hint": "如实说图没发出去。"}
@@ -420,7 +429,10 @@ async def _impl_history_lookup(plugin: Any, event: Any, payload: dict) -> dict[s
         limit = 10
     session_id = str(getattr(event, "unified_msg_origin", "") or "")
     try:
-        text = plugin._recent_timeline_text(session_id, limit=limit)
+        text = plugin._recent_timeline_text(
+            session_id, limit=limit,
+            persona_id=str(getattr(event, "_storyteller_memory_persona", "") or ""),
+        )
     except Exception as exc:
         return {"ok": False, "status": "error", "message": f"读取失败：{exc}"}
     if not text:
@@ -560,6 +572,8 @@ _register(Capability(
 def available_capabilities(plugin: Any, mode: str) -> list[Capability]:
     """按链路与开关筛选出可用能力（未实现 handler 的不列出）。"""
     out: list[Capability] = []
+    if not plugin.config.bool("capabilities.enabled", True):
+        return out
     for cap in CAPABILITIES.values():
         if cap.impl is None:
             continue
@@ -644,31 +658,94 @@ def build_declaration(plugin: Any, mode: str) -> str:
     return "\n".join(lines)
 
 
-def parse_marks(text: str) -> list[tuple[str, dict]]:
-    """从回复文本里解析 [DO:能力]{json}（容错：JSON 坏了就按空参数处理）。"""
-    out: list[tuple[str, dict]] = []
-    for m in DO_PATTERN.finditer(str(text or "")):
-        name = m.group(1)
-        raw = (m.group(2) or "").strip()
-        payload: dict = {}
-        if raw.startswith("{"):
+def _mark_spans(text: str):
+    """扫描括号与字符串边界，支持嵌套参数及字符串内的括号。"""
+    cursor = 0
+    while (mark := DO_PATTERN.search(text, cursor)) is not None:
+        end = mark.end()
+        start = end
+        while start < len(text) and text[start].isspace():
+            start += 1
+        payload = {}
+        if start < len(text) and text[start] in "{[":
+            stack = []
+            quoted = escaped = False
+            end = len(text)
+            for pos in range(start, len(text)):
+                char = text[pos]
+                if quoted:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        quoted = False
+                elif char == '"':
+                    quoted = True
+                elif char in "{[":
+                    stack.append(char)
+                elif char in "}]":
+                    if not stack or (stack.pop(), char) not in (("{", "}"), ("[", "]")):
+                        end = pos + 1
+                        break
+                    if not stack:
+                        end = pos + 1
+                        break
             try:
-                value = json.loads(raw)
+                value = json.loads(text[start:end])
                 if isinstance(value, dict):
                     payload = value
-            except Exception:
-                payload = {}
-        out.append((name, payload))
-    return out
+            except (ValueError, TypeError):
+                pass
+        yield mark.start(), end, mark.group(1), payload
+        cursor = end
+
+
+def parse_marks(text: str) -> list[tuple[str, dict]]:
+    """解析能力标记，坏 JSON 保持空参数兼容。"""
+    return [(name, payload) for _, _, name, payload in _mark_spans(str(text or ""))]
 
 
 def strip_marks(text: str) -> str:
-    """剔除 [DO:...] 标记（含其 JSON），保证不发给用户。"""
-    cleaned = DO_PATTERN.sub("", str(text or ""))
-    return re.sub(r"\s{2,}", " ", cleaned).strip()
+    """剔除完整协议；不完整参数也不进入可见回复。"""
+    text = str(text or "")
+    parts = []
+    cursor = 0
+    for start, end, _, _ in _mark_spans(text):
+        parts.append(text[cursor:start])
+        cursor = end
+    parts.append(text[cursor:])
+    return re.sub(r"\s{2,}", " ", "".join(parts)).strip()
 
 
 async def dispatch(plugin: Any, event: Any, name: str, payload: dict) -> dict[str, Any]:
+    """同类能力串行检查限额；同一事件的同参数成功调用复用结果。"""
+    if not plugin.config.bool("capabilities.enabled", True):
+        import time
+        _log_call(plugin, name, "disabled", False, time.time(), "能力系统已关闭")
+        return {"ok": False, "status": "disabled", "capability": name,
+                "message": "能力系统已关闭", "next_hint": "这次没有执行，别声称已完成。"}
+    locks = getattr(plugin, "_cap_locks", None)
+    if not isinstance(locks, dict):
+        locks = plugin._cap_locks = {}
+    async with locks.setdefault(name, asyncio.Lock()):
+        cache = getattr(event, "_storyteller_cap_results", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            try:
+                setattr(event, "_storyteller_cap_results", cache)
+            except Exception:
+                pass
+        key = (name, json.dumps(payload or {}, sort_keys=True, ensure_ascii=False))
+        if name != "share_inner" and key in cache:
+            return dict(cache[key], reused=True)
+        result = await _dispatch_locked(plugin, event, name, payload)
+        if name != "share_inner" and result.get("ok"):
+            cache[key] = dict(result)
+        return result
+
+
+async def _dispatch_locked(plugin: Any, event: Any, name: str, payload: dict) -> dict[str, Any]:
     """执行一个能力：开关/限额/去重登记一起处理（并记一条调用日志，供面板观测）。"""
     import time as _t
 

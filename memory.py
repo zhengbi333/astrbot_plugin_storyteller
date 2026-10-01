@@ -51,6 +51,8 @@ def build_session_context(event: Any) -> dict[str, str]:
     session_id = sender.get("session_id") or ""
     platform = session_id.split(":", 1)[0] if ":" in session_id else ""
     low = session_id.lower()
+    group_id = ""
+    group_id = ""
     if ":groupmessage:" in low or ":group:" in low:
         scope = "group"
     elif (
@@ -62,12 +64,34 @@ def build_session_context(event: Any) -> dict[str, str]:
         scope = "private"
     else:
         scope = "unknown"
+    getter = getattr(event, "get_group_id", None)
+    if callable(getter):
+        try:
+            group_id = str(getter() or "").strip()
+        except Exception:
+            pass
+    if group_id:
+        scope = "group"
+    elif scope == "group":
+        group_id = session_id.rsplit(":", 1)[-1]
+    getter = getattr(event, "get_group_id", None)
+    if callable(getter):
+        try:
+            group_id = str(getter() or "").strip()
+        except Exception:
+            pass
+    if group_id:
+        scope = "group"
+    elif scope == "group":
+        group_id = session_id.rsplit(":", 1)[-1]
     return {
         "session_id": session_id,
         "scope": scope,
         "platform": platform,
         "user_id": sender.get("user_id") or "",
         "user_name": sender.get("user_name") or "",
+        "group_id": group_id,
+        "group_id": group_id,
     }
 
 

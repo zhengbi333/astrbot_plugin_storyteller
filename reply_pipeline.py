@@ -442,7 +442,7 @@ class ReplyPipeline:
                             parts.append(f"对方称呼：{name}")
             lister = getattr(bridge, "list_recent_memories", None)
             if callable(lister) and user_id:
-                records = lister(session_context={"user_id": user_id}, limit=4)
+                records = lister(session_context=self._plugin._session_ctx_dict(event), limit=4)
                 if isinstance(records, list):
                     memories = []
                     for r in records[:4]:

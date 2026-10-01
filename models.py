@@ -280,6 +280,7 @@ async def chat_with_tools(
     max_tokens: int | None = None,
     max_think_chars: int = 12000,
     max_chars: int = 12000,
+    tool_choice: str = "auto",
 ) -> _ChatResult:
     """直连上游「带工具」的一次流式调用：返回 completion_text + tool_calls（已聚合）。
 
@@ -304,8 +305,9 @@ async def chat_with_tools(
         "model": info["model"],
         "messages": list(messages or []),
         "stream": True,
+        "stream_options": {"include_usage": True},
         "tools": list(tools),
-        "tool_choice": "auto",
+        "tool_choice": tool_choice,
     }
     if disable_thinking:
         body["thinking"] = {"type": "disabled"}
@@ -323,8 +325,15 @@ async def chat_with_tools(
         async with client.stream("POST", url, headers=headers, json=body) as resp:
             if resp.status_code in (400, 422):
                 buf = await resp.aread()
+                detail = buf.decode("utf-8", "replace")
+                if disable_thinking and "thinking" in detail.lower():
+                    return await chat_with_tools(
+                        provider, config, messages=messages, tools=tools, timeout=timeout,
+                        disable_thinking=False, max_tokens=max_tokens,
+                        max_think_chars=max_think_chars, max_chars=max_chars, tool_choice=tool_choice,
+                    )
                 raise _ToolsUnsupported(
-                    f"提供方不接受 tools/thinking 参数：HTTP {resp.status_code} {buf.decode('utf-8', 'replace')[:120]}"
+                    f"提供方不接受 tools 参数：HTTP {resp.status_code} {buf.decode('utf-8', 'replace')[:120]}"
                 )
             if resp.status_code != 200:
                 buf = await resp.aread()
@@ -356,8 +365,7 @@ async def chat_with_tools(
                 _accumulate_text(parts, str(delta.get("content") or ""))
                 if len("".join(parts)) > max_chars:
                     raise _StreamEarlyAbort(f"生成内容超长（>{max_chars} 字符），已截断放弃")
-                if choice.get("finish_reason"):
-                    break
+                # finish_reason 后仍可能有独立 usage 尾帧，继续读取至 [DONE]。
 
     result = _ChatResult("".join(parts), _usage_from_dict(usage))
     # tool_calls 按 index 排序后挂到结果上（空 id 的补一个占位，保证消息回填合法）
@@ -427,7 +435,9 @@ def _usage_from_dict(u: Any) -> Any:
         completion = int(u.get("completion_tokens") or 0)
         from types import SimpleNamespace
 
-        return SimpleNamespace(input_other=prompt, input_cached=0, output=completion)
+        details = u.get("prompt_tokens_details") or {}
+        cached = min(prompt, max(0, int(details.get("cached_tokens") or u.get("prompt_cache_hit_tokens") or 0)))
+        return SimpleNamespace(input_other=max(0, prompt - cached), input_cached=cached, output=completion)
     except Exception:
         return None
 

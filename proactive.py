@@ -294,7 +294,15 @@ class ProactiveManager:
         if engine is None:
             self._record_candidate({"user": user, "outcome": "blocked", "reason": "念头引擎未就绪"})
             return
-        candidates = [c for c in engine.collect() if (not c.user or c.user == user)]
+        session_context = {"session_id": self._resolve_session(user), "user_id": user}
+        bridge = self._plugin._get_memory_bridge()
+        resolver = getattr(bridge, "resolve_persona_for", None)
+        if callable(resolver):
+            try:
+                session_context["persona_id"] = await resolver(session_context)
+            except Exception:
+                pass
+        candidates = [c for c in engine.collect(session_context=session_context) if (not c.user or c.user == user)]
         # 关系适配：好感度低 → 只允许高重要性由头
         try:
             rels = self._plugin.relationship_store.list_all()
@@ -453,10 +461,17 @@ class ProactiveManager:
         timeline_hint = ""
         bridge = self._plugin._get_memory_bridge() if hasattr(self._plugin, "_get_memory_bridge") else None
         if bridge is not None:
+            session_context = {"session_id": self._resolve_session(user), "scope": "private", "user_id": user}
+            resolver = getattr(bridge, "resolve_persona_for", None)
+            if callable(resolver):
+                try:
+                    session_context["persona_id"] = await resolver(session_context)
+                except Exception:
+                    pass
             try:
                 lister = getattr(bridge, "list_recent_memories", None)
                 if callable(lister):
-                    records = lister(session_context={"user_id": user}, limit=5)
+                    records = lister(session_context=session_context, limit=5)
                     if isinstance(records, list) and records:
                         items = []
                         for r in records[:5]:
@@ -470,7 +485,7 @@ class ProactiveManager:
             try:
                 tl = getattr(bridge, "get_timeline", None)
                 if callable(tl):
-                    events = tl(session_context={"user_id": user}, limit=5)
+                    events = tl(session_context=session_context, limit=5)
                     if isinstance(events, list) and events:
                         from .timeline_filter import is_llm_context_event
 
