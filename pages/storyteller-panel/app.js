@@ -2496,7 +2496,7 @@ async function renderMind() {
               <div><h3 class="panel-title">见闻</h3><span class="hint">刷到的新鲜事</span></div>
               <button class="btn" id="mind-browse" style="white-space:nowrap">刷一刷</button>
             </div>
-            <div id="mind-list-sightings"></div>
+            <div id="mind-list-sightings" style="max-height:290px;overflow-y:auto;padding-right:4px"></div>
             <div class="field" style="margin-top:8px">
               <div class="field-title">搜一段新鲜事（手动）</div>
               <div class="field-row" style="gap:6px">
@@ -3128,7 +3128,7 @@ async function renderSend() {
   const recordPageItems = pageSlice(records, state.sendRecordPage);
   view.innerHTML = `
     <section class="section">
-      ${masterSwitch("send-enabled", "发送缓冲", "接管回复按自然句段拆入缓存、逐条发送；用户抢话时自动裁决（A 说完再回 / B 丢掉重新组织）。", data.enabled)}
+      ${masterSwitch("send-enabled", "发送缓冲", "接管回复按自然句段拆入缓存、逐条发送；用户抢话时按「抢话处理方式」执行（默认：作废剩余并连同已发出的话重新理解）。", data.enabled)}
       <div class="section-head">
         <h2 class="section-title">发送缓冲与「被抢话」裁决</h2>
         <p class="section-desc">只有<b>接管改换</b>链路的回复进缓冲（我们生成我们发）；放行/走主链的回复由 AstrBot 管线发送，无法缓存。插件重载时未发完的缓存会丢弃。</p>
@@ -3170,10 +3170,18 @@ async function renderSend() {
           <div class="settings-grid" style="grid-template-columns:1fr">
             ${renderSettingField("send", "chunk_interval_min", sendItems.chunk_interval_min || { description: "短句间隔(秒)", type: "float", default: 0.8 }, cfg("chunk_interval_min", 0.8))}
             ${renderSettingField("send", "chunk_interval_max", sendItems.chunk_interval_max || { description: "长句间隔(秒)", type: "float", default: 4.0 }, cfg("chunk_interval_max", 4.0))}
+            ${renderSettingField("send", "interrupt_mode", sendItems.interrupt_mode || { description: "抢话处理方式", type: "string", options: ["作废重理解", "模型裁决", "提速发完"], default: "作废重理解" }, cfg("interrupt_mode", "作废重理解"))}
+            ${renderSettingField("send", "max_restarts", sendItems.max_restarts || { description: "打断重生成上限(次)", type: "int", default: 2 }, cfg("max_restarts", 2))}
             ${renderSettingField("send", "interrupt_judge_enabled", sendItems.interrupt_judge_enabled || { description: "抢话裁决", type: "bool", default: true }, cfg("interrupt_judge_enabled", true))}
             ${renderSettingField("send", "interrupt_judge_provider_id", sendItems.interrupt_judge_provider_id || { description: "抢话裁决模型", type: "string", role: "provider", default: "" }, cfg("interrupt_judge_provider_id", ""))}
           </div>
-          <div class="hint" style="margin-top:8px">裁决关闭时固定按 A（提速发完再回）。被判 B 时，没说完的话会作为上下文注入下一轮生成（像被打断后重新组织）。</div>
+          <div class="hint" style="margin-top:8px">
+            <b>抢话处理方式</b>（0.194 起默认「作废重理解」）：用户在你还没发完时又发消息——
+            <b>作废重理解</b>=丢掉没发出的部分，连同「已经发出去的话」与用户新消息一起重新理解、重新回一条（最自然）；
+            <b>模型裁决</b>=由裁决模型判断（A 说完再回 / B 憋回去重新组织）；
+            <b>提速发完</b>=赶紧把剩下的发完再回新消息。<br>
+            生成期间对方连发消息时，最多按「打断重生成上限」重来几次（超出直接发当前回复，保证不会一直不回）。
+          </div>
         </section>
       </div>
     </div>
@@ -4672,12 +4680,17 @@ async function renderTroubleshoot() {
   const renderListOnly = () => {
     const node = document.getElementById("check-list");
     if (!node) return;
+    const snap = state.current === "troubleshoot" ? _scrollSnapshot() : null;
     const { list } = renderResults();
     node.innerHTML = list;
     bindSingleButtons();
+    if (snap) _scrollRestore(snap);
   };
   const rerenderAll = () => {
-    if (state.current === "troubleshoot") renderTroubleshoot();
+    if (state.current === "troubleshoot") {
+      const snap = _scrollSnapshot();
+      Promise.resolve(renderTroubleshoot()).finally(() => _scrollRestore(snap));
+    }
   };
   const bindSingleButtons = () => {
     document.querySelectorAll("[data-check-key]").forEach((node) => {

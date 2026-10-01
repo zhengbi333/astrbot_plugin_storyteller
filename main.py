@@ -1,4 +1,4 @@
-﻿"""为你续写的故事：AstrBot 陪伴插件。
+"""为你续写的故事：AstrBot 陪伴插件。
 
 承载插件生命周期、数据目录、外观、消息防抖、主链 LLM 请求拦截、
 拟人化锚注入（身份/风格/状态/日程）、记忆写入与用户画像、智能主动对话。
@@ -215,6 +215,7 @@ class StorytellerPlugin(Star):
         self._memory_written_cache: dict[str, tuple[str, str, float, str]] = {}  # 0.191：会话 -> (已写入内容, 类型, 时间戳, 原文key)
         # 0.194：生成中状态（打断 + 合并重新理解）——会话 -> {"started","pending","restarts","mode","first_text"}
         self._inflight: dict[str, dict[str, Any]] = {}
+        self._silence_streak: dict[str, int] = {}  # 0.195：连续沉默计数（防止判定误伤导致一直不理人）
         try:
             self._migrate_intercept_template()
         except Exception:
@@ -2205,6 +2206,42 @@ class StorytellerPlugin(Star):
                         content = polished
                 except Exception:
                     pass
+            # 0.195：回复判定（沉默/草草回复）——接管直连此前绕过判定，导致「每条消息都必回」；
+            # 这里补上：判定模型认为此刻不该接话（敷衍收尾/话题自然结束/重复道别）时就不发。
+            # 保险：连续沉默不超过 silence_streak_limit 次（防止误判导致一直不理人）。
+            if content and self.config.bool("pipeline.takeover_judge_enabled", True):
+                try:
+                    judged = await asyncio.wait_for(
+                        self.reply_pipeline.judge_for_takeover(event, content), timeout=25
+                    )
+                except Exception as exc:
+                    logger.warning("[Storyteller] 接管回复判定失败（按正常回复）: %s", exc)
+                    judged = None
+                if isinstance(judged, dict):
+                    action = str(judged.get("action") or "send").strip().lower()
+                    reason = str(judged.get("reason") or "")[:80]
+                    limit = max(0, min(10, self.config.int("pipeline.silence_streak_limit", 2)))
+                    streak = int(self._silence_streak.get(session_id, 0))
+                    if action == "silence" and streak < limit:
+                        self._silence_streak[session_id] = streak + 1
+                        logger.info(
+                            "[Storyteller] 判定沉默，本轮不回复: session=%s 连续=%s/%s reason=%s",
+                            session_id, streak + 1, limit, reason,
+                        )
+                        self._record_sent(
+                            mode="接管改换", event=event, system_prompt=final_system, prompt=prompt,
+                            blocked=True, note=f"判定沉默（{reason}）",
+                        )
+                        self._stop_llm(event)
+                        return
+                    if action == "silence":
+                        logger.info("[Storyteller] 连续沉默达上限（%s），强制回复一次: session=%s", limit, session_id)
+                    self._silence_streak[session_id] = 0
+                    if action == "brief":
+                        brief = str(judged.get("text") or "").strip()
+                        if brief:
+                            content = brief
+                            logger.info("[Storyteller] 判定草草回复: session=%s text=%s", session_id, brief[:20])
             # 0.193：表情包判定（接管直连绕过主链判定，此前永远没有占位符 → 表情包从不发送）
             if content:
                 try:

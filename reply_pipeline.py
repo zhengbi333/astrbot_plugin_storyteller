@@ -16,6 +16,10 @@ from .log import logger
 from .models import chat_text, resolve_chat_provider
 
 EMOJI_PATTERN = re.compile(r"\[EMOJI:([^\]]+)\]")
+# 0.195：用户明确索要表情包（「发个表情包」「来个表情」…）→ 直接发，不必等判定模型点头
+EMOJI_ASK_PATTERN = re.compile(
+    r"发[个张一]?表情|来个表情|来张表情|发表情包|发张表情|表情包发|发个表情包|整[个张]表情|给我发.*表情"
+)
 
 # 草草回复的候选短语（判定模型可复用，也作为解析兜底）
 BRIEF_CANDIDATES = ("?", "？", "...", "…", "...?", "…？", "...啊?", "…啊？", "诶？", "啊？")
@@ -224,16 +228,24 @@ class ReplyPipeline:
         categories = self._usable_categories()
         if not categories:
             return text
-        provider, provider_id = resolve_chat_provider(self._plugin.context, self._config(), "emoji_judge")
-        if provider is None:
-            provider, provider_id = resolve_chat_provider(self._plugin.context, self._config(), "judge")
-        if provider is None:
-            return text
         user_text = ""
         try:
             user_text = str(getattr(event, "message_str", "") or "").strip()
         except Exception:
             user_text = ""
+        # 0.195：用户明确索要表情包 → 直接带一张（跳过判定与概率闸，这是明确指令不是语气判断）
+        try:
+            if user_text and EMOJI_ASK_PATTERN.search(user_text):
+                title = categories[0]
+                logger.info("[Storyteller] 用户明确索要表情包 → 直接发送: category=%s", title)
+                return f"{text} [EMOJI:{title}]"
+        except Exception:
+            pass
+        provider, provider_id = resolve_chat_provider(self._plugin.context, self._config(), "emoji_judge")
+        if provider is None:
+            provider, provider_id = resolve_chat_provider(self._plugin.context, self._config(), "judge")
+        if provider is None:
+            return text
         try:
             resp = await chat_text(
                 provider, self._config(),
@@ -271,6 +283,21 @@ class ReplyPipeline:
             return build_presence_anchor(self._plugin.presence_store.load())
         except Exception:
             return ""
+
+    async def judge_for_takeover(self, event: Any, reply_text: str) -> dict[str, Any] | None:
+        """0.195：接管改换链路专用——判定「沉默 / 草草回复 / 正常发送」。
+
+        主链路径由 process() 内建判定；接管是插件直连生成，此前完全绕过判定，
+        导致「用户每条消息都必回」（不会主动沉默）。这里补上同一判定。
+        """
+        try:
+            if not self._config().bool("pipeline.judge_enabled", True):
+                return None
+            user_text = str(getattr(event, "message_str", "") or "").strip()
+            return await self._judge(reply_text, user_text, self._presence_text(), self._relationship_text(event))
+        except Exception as exc:
+            logger.warning("[Storyteller] 接管回复判定异常: %s", exc)
+            return None
 
     async def process(self, event: Any, resp: Any) -> str:
         """处理主链回复，返回最终 completion_text（可能含表情包占位符）。"""
