@@ -83,6 +83,7 @@ class ReplyBufferManager:
         self._records: list[dict[str, Any]] = []  # 裁决/发送记录（页面展示）
         self._speed_up: dict[str, bool] = {}
         self._interrupted: dict[str, str] = {}
+        self._sent_texts: dict[str, list[str]] = {}   # 0.194：已真正发出的内容（抢话时并入上下文）
 
     # ------------------------------------------------------------ 配置
 
@@ -94,6 +95,14 @@ class ReplyBufferManager:
 
     def judge_enabled(self) -> bool:
         return bool(self._config().bool("send.interrupt_judge_enabled", True))
+
+    def interrupt_mode(self) -> str:
+        """0.194 抢话处理策略：作废重理解（默认）/ 模型裁决（旧 A、B）/ 提速发完。"""
+        try:
+            value = str(self._config().get("send.interrupt_mode", "作废重理解") or "").strip()
+        except Exception:
+            value = ""
+        return value if value in ("作废重理解", "模型裁决", "提速发完") else "作废重理解"
 
     def _interval(self, item: dict[str, Any], *, speed_up: bool = False) -> float:
         if speed_up:
@@ -198,6 +207,14 @@ class ReplyBufferManager:
                     except Exception:
                         pass
             await sender(session_id, chain)
+            # 0.194：记录「已真正发出」的内容——抢话作废重理解时要把它们作为上下文并入，避免空档
+            try:
+                with self._lock:
+                    bucket = self._sent_texts.setdefault(session_id, [])
+                    bucket.append(text)
+                    del bucket[:-6]
+            except Exception:
+                pass
             return True
         except Exception as exc:
             logger.warning("[Storyteller] 缓冲发送失败: %s", exc)
@@ -220,6 +237,30 @@ class ReplyBufferManager:
         asyncio.ensure_future(self._interrupt(session_id, event))
 
     async def _interrupt(self, session_id: str, event: Any) -> None:
+        # 0.194 默认策略：作废剩余 + 并入重新理解（已发出的内容一并作为上下文，避免空档）
+        mode = self.interrupt_mode()
+        if mode == "作废重理解":
+            with self._lock:
+                queue = self._queues.pop(session_id, None)
+            self._speed_up.pop(session_id, None)
+            left = " ".join(str(q.get("text") or "") for q in (queue or []) if not q.get("sent"))[:600]
+            with self._lock:
+                sent = list(self._sent_texts.get(session_id) or [])
+            if left:
+                self._interrupted[session_id] = left
+            self._push_record(
+                session_id, "interrupt",
+                f"抢话：作废剩余并入重新理解（已发 {len(sent)} 条 / 未发 {len(left)} 字）",
+            )
+            logger.info(
+                "[Storyteller] 抢话：作废剩余并入重理解 session=%s 已发=%s 未发=%s字",
+                session_id, len(sent), len(left),
+            )
+            return
+        if mode == "提速发完":
+            self._speed_up[session_id] = True
+            self._push_record(session_id, "interrupt", "用户抢话：提速发完剩余（配置指定）")
+            return
         if not self.judge_enabled():
             # 默认 A：提速发完，新消息正常一轮
             self._speed_up[session_id] = True
@@ -286,6 +327,17 @@ class ReplyBufferManager:
         if text:
             self._push_record(session_id, "context", "B 方案上下文已注入本轮生成")
         return text
+
+    def take_sent_text(self, session_id: str) -> str:
+        """0.194：取走「已经发出去的回复」文本（抢话重理解时作为上下文并入；取走即清）。"""
+        with self._lock:
+            texts = self._sent_texts.pop(session_id, None) or []
+        if not texts:
+            return ""
+        joined = "；".join(t for t in texts if t)[:400]
+        if joined:
+            self._push_record(session_id, "context", "已发出的回复已并入本轮上下文")
+        return joined
 
     def pending_text(self, session_id: str) -> str:
         with self._lock:

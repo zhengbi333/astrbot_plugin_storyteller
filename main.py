@@ -1,4 +1,4 @@
-"""为你续写的故事：AstrBot 陪伴插件。
+﻿"""为你续写的故事：AstrBot 陪伴插件。
 
 承载插件生命周期、数据目录、外观、消息防抖、主链 LLM 请求拦截、
 拟人化锚注入（身份/风格/状态/日程）、记忆写入与用户画像、智能主动对话。
@@ -10,6 +10,7 @@ import asyncio
 import importlib
 import re
 import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -212,6 +213,8 @@ class StorytellerPlugin(Star):
         self._image_wish_cache: dict[str, tuple[str, float]] = {}  # 0.183：会话 -> ({生图意愿} 标记文本, 时间戳)
         self._search_result_cache: dict[str, tuple[str, str, float]] = {}  # 0.189：会话 -> ({搜索结果} 标记文本, 查询词, 时间戳)
         self._memory_written_cache: dict[str, tuple[str, str, float, str]] = {}  # 0.191：会话 -> (已写入内容, 类型, 时间戳, 原文key)
+        # 0.194：生成中状态（打断 + 合并重新理解）——会话 -> {"started","pending","restarts","mode","first_text"}
+        self._inflight: dict[str, dict[str, Any]] = {}
         try:
             self._migrate_intercept_template()
         except Exception:
@@ -590,6 +593,18 @@ class StorytellerPlugin(Star):
                 logger.info("[Storyteller] 拦截阻断: session=%s prompt=%s", session_id, prompt[:60])
                 return
             if mode in (MODE_TAKEOVER, MODE_TAKEOVER_MAINCHAIN):
+                # 0.194：生成中收到新消息 → 本轮不排队、不生成：并入 pending，等当前轮作废后合并重新理解
+                # （覆盖范围：接管改换 / 接管走主链；放行/监视无法打断主链生成、阻断本就不生成——见 changelog）
+                _st = self._inflight_state(session_id)
+                if _st is not None:
+                    _st.setdefault("pending", []).append(text)
+                    logger.info(
+                        "[Storyteller] 生成中收到新消息：并入待合并重理解 session=%s pending=%s",
+                        session_id, len(_st["pending"]),
+                    )
+                    self._stop_llm(event)
+                    return
+                self._inflight_begin(session_id, mode=mode, first_text=text)
                 # 0.189：接管模板组装前先做会话搜索（{搜索结果} 占位符引用 10 分钟缓存）
                 if self.config.bool("search.enabled", True):
                     try:
@@ -1192,6 +1207,47 @@ class StorytellerPlugin(Star):
                 stop()
             except Exception:
                 pass
+
+    # ------------------------------------------------------------ 打断与合并重理解（0.194）
+
+    def _inflight_state(self, session_id: str) -> dict[str, Any] | None:
+        """取该会话「正在生成」的状态；超过 TTL 视为异常残留并清理。"""
+        st = self._inflight.get(session_id)
+        if not st:
+            return None
+        ttl = max(30, self.config.int("send.inflight_ttl", 180))
+        try:
+            if time.time() - float(st.get("started") or 0) > ttl:
+                self._inflight.pop(session_id, None)
+                return None
+        except Exception:
+            self._inflight.pop(session_id, None)
+            return None
+        return st
+
+    def _inflight_begin(self, session_id: str, *, mode: str, first_text: str) -> dict[str, Any]:
+        """登记一轮生成（供后续新消息判断「该不该并入而不是排队」）。"""
+        st: dict[str, Any] = {
+            "started": time.time(),
+            "pending": [],
+            "restarts": 0,
+            "mode": mode,
+            "first_text": str(first_text or ""),
+        }
+        self._inflight[session_id] = st
+        return st
+
+    def _inflight_take_pending(self, session_id: str) -> list[str]:
+        """取走并清空待合并文本（本轮生成期间到达的新消息）。"""
+        st = self._inflight.get(session_id)
+        if not st:
+            return []
+        pend = [str(x) for x in (st.get("pending") or []) if str(x).strip()]
+        st["pending"] = []
+        return pend
+
+    def _inflight_end(self, session_id: str) -> None:
+        self._inflight.pop(session_id, None)
 
     def _record_sent(
         self,
@@ -1917,9 +1973,19 @@ class StorytellerPlugin(Star):
             anchors["context"] = self._dedupe_current_message(
                 anchors["context"], str(prompt or user_text or "").strip()
             )
-            # 被抢话（B 方案）：把「没说完的话」作为上文注入，像被打断后重新组织语言
+            # 被抢话：把「已经发出去的回复」与「没说完的话」作为上文注入，像被打断后重新组织语言
+            # （0.194：已发出的内容必须并入，否则模型不知道自己刚说过什么、会出现空档）
             buffer = getattr(self, "reply_buffer", None)
             if buffer is not None:
+                try:
+                    sent_ctx = buffer.take_sent_text(session_id)
+                    if sent_ctx:
+                        anchors["current_text"] = (
+                            f"（你刚才已经回过这些，别重复也不要当成没说过：{sent_ctx}\n"
+                            f"现在对方又说了：{anchors['current_text']}）"
+                        )
+                except Exception:
+                    pass
                 try:
                     interrupted = buffer.take_interrupted_text(session_id)
                     if interrupted:
@@ -2035,32 +2101,65 @@ class StorytellerPlugin(Star):
                 call_prompt = f"{final_system}\n\n{send_prompt}".strip()
             # 接管回复属创作（要拟人、要走心）：保留模型思考
             call_kwargs["_disable_thinking"] = False
-            try:
-                from astrbot.api.event import MessageChain
+            # 0.194：生成 → （被打断则作废并合并重新理解）→ 润色，最多重启 max_restarts 次
+            max_restarts = max(0, min(5, self.config.int("send.max_restarts", 2)))
+            attempt = 0
+            while True:
+                try:
+                    from astrbot.api.event import MessageChain
 
-                resp = await asyncio.wait_for(
-                    chat_text(
-                        provider,
-                        self.config,
-                        prompt=call_prompt,
-                        session_id=f"storyteller_takeover:{getattr(event, 'unified_msg_origin', '')}",
-                        **call_kwargs,
-                    ),
-                    timeout=90,
+                    resp = await asyncio.wait_for(
+                        chat_text(
+                            provider,
+                            self.config,
+                            prompt=call_prompt,
+                            session_id=f"storyteller_takeover:{getattr(event, 'unified_msg_origin', '')}",
+                            **call_kwargs,
+                        ),
+                        timeout=90,
+                    )
+                    if not str(getattr(resp, "completion_text", "") or "").strip():
+                        raise RuntimeError("接管生成返回空内容")
+                except (asyncio.TimeoutError, Exception) as exc:
+                    logger.warning("[Storyteller] 接管改换: 生成失败/超时: %s", exc)
+                    # 按「接管失败时」策略：默认降级放行主链（原行为为静默阻断 + 直发文案）
+                    await self._takeover_fallback(event, system_prompt=final_system, prompt=prompt, reason=f"生成失败/超时: {exc}")
+                    return
+                self._record_usage(resp, "takeover", provider_id or "default")
+                content = str(getattr(resp, "completion_text", "") or "").strip()
+                try:
+                    logger.info("[Storyteller] 接管生成内容: len=%d %s", len(content), content[:120].replace("\n", " "))  # 排查日志(临时)
+                except Exception:
+                    pass
+                # 0.194：生成期间对方又发了消息 → 作废本轮结果、合并重新理解（受 max_restarts 限制）
+                _pend = self._inflight_take_pending(session_id)
+                if not _pend or attempt >= max_restarts:
+                    if _pend:
+                        logger.info(
+                            "[Storyteller] 打断重理解：重启达上限（%s），直接发送当前回复（pending=%s）",
+                            max_restarts, len(_pend),
+                        )
+                    break
+                attempt += 1
+                _joined = "\n".join(_pend)
+                logger.info(
+                    "[Storyteller] 打断重理解：作废本轮生成，合并 %s 条重新生成（第 %s 次）",
+                    len(_pend), attempt,
                 )
-                if not str(getattr(resp, "completion_text", "") or "").strip():
-                    raise RuntimeError("接管生成返回空内容")
-            except (asyncio.TimeoutError, Exception) as exc:
-                logger.warning("[Storyteller] 接管改换: 生成失败/超时: %s", exc)
-                # 按「接管失败时」策略：默认降级放行主链（原行为为静默阻断 + 直发文案）
-                await self._takeover_fallback(event, system_prompt=final_system, prompt=prompt, reason=f"生成失败/超时: {exc}")
-                return
-            self._record_usage(resp, "takeover", provider_id or "default")
-            content = str(getattr(resp, "completion_text", "") or "").strip()
-            try:
-                logger.info("[Storyteller] 接管生成内容: len=%d %s", len(content), content[:120].replace("\n", " "))  # 排查日志(临时)
-            except Exception:
-                pass
+                # 把新到的话并联进 system（模型重新理解整段，只回一条、先照顾最新一句）
+                try:
+                    final_system = (
+                        str(final_system)
+                        + "\n\n【对方又补充说了】\n" + _joined
+                        + "\n（把上面这些和之前那句一起理解；只回一条，先照顾最新的一句。）"
+                    )
+                    if accept_sys:
+                        call_kwargs["system_prompt"] = final_system
+                    else:
+                        call_prompt = f"{final_system}\n\n{send_prompt}".strip()
+                except Exception:
+                    pass
+                continue
             # 0.159 索要硬兜底：提示词已注入人格/身份/风格等，正常应直接回应；若模型仍索要
             # 「设定/上下文/角色」(多轮实机症状) → 带"严禁索要"重生成一次；仍索要 → 固定自然短句
             if content and _looks_asking_context(content):
@@ -2169,6 +2268,12 @@ class StorytellerPlugin(Star):
                 )
             except Exception:
                 pass
+        finally:
+            # 0.194：无论成功/失败/异常，都结束本会话的「生成中」状态（否则后续消息会被误判为打断）
+            try:
+                self._inflight_end(str(getattr(event, "unified_msg_origin", "") or ""))
+            except Exception:
+                pass
 
     def _text_chat_accepts_system_prompt(self, provider: Any) -> bool:
         """探测 provider.text_chat 是否接受 system_prompt 命名参数（兼容不同 AstrBot/provider 版本）。
@@ -2221,6 +2326,33 @@ class StorytellerPlugin(Star):
             self._record_main_chain_usage(event, resp)
         except Exception:
             pass
+        # 0.194：接管走主链的「打断 + 合并重新理解」——本轮生成期间用户又说话了：
+        # 主链回复无法在生成中途打断，故在回复返回时作废本轮，改用合并内容补发一次（接管式直连）。
+        # 覆盖范围仅「接管改换 / 接管走主链」；放行与监视模式生成在 AstrBot 内部、无法打断（见 changelog）。
+        try:
+            from .intercept import MODE_TAKEOVER_MAINCHAIN as _MODE_MC
+
+            _sid = str(getattr(event, "unified_msg_origin", "") or "")
+            _st = self._inflight_state(_sid)
+            if _st is not None and str(_st.get("mode") or "") == _MODE_MC:
+                _pend = self._inflight_take_pending(_sid)
+                self._inflight_end(_sid)
+                if _pend:
+                    _merged = "\n".join([str(_st.get("first_text") or ""), *_pend])
+                    logger.info(
+                        "[Storyteller] 接管走主链：本轮回复作废，合并 %s 条补发一次 session=%s",
+                        len(_pend), _sid,
+                    )
+                    try:
+                        resp.completion_text = ""
+                        resp.result_chain = None
+                    except Exception:
+                        pass
+                    _req = types.SimpleNamespace(prompt=_merged, system_prompt="", contexts=[])
+                    await self._takeover_reply(event, _req, _merged, _merged, "")
+                    return
+        except Exception as exc:
+            logger.warning("[Storyteller] 接管走主链打断处理异常: %s", exc)
         if not self.config.bool("pipeline.enabled", True):
             return
         try:

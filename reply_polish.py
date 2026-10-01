@@ -43,6 +43,26 @@ class ReplyPolisher:
     def _config(self) -> Any:
         return self._plugin.config
 
+    async def _call_with_timeout(self, provider: Any, prompt: str) -> Any:
+        """0.194：润色关闭思考 + 限时——此前保留思考导致单步 67 秒（实机日志实证），
+        回复链被拖慢、后续消息只能排队。超时/异常由调用方回退原回复。"""
+        import asyncio as _asyncio
+
+        from .models import chat_text
+
+        try:
+            timeout = float(self._config().int("rewrite.timeout_seconds", 25) or 25)
+        except Exception:
+            timeout = 25.0
+        timeout = max(5.0, min(120.0, timeout))
+        return await _asyncio.wait_for(
+            chat_text(
+                provider, self._config(), prompt=prompt, session_id="storyteller_polish",
+                _disable_thinking=True,  # 改写任务：不需要长思考
+            ),
+            timeout=timeout,
+        )
+
     async def polish(self, event: Any, reply_text: str) -> str:
         """润色一条回复：开启且可用则润色，否则/失败回退原回复；并记录输入输出。"""
         raw = str(reply_text or "")
@@ -99,10 +119,7 @@ class ReplyPolisher:
                 len(raw), raw[:100].replace("\n", " "),
                 prompt[:180].replace("\n", "⏎"),
             )
-            resp = await chat_text(
-                provider, self._config(), prompt=prompt, session_id="storyteller_polish",
-                _disable_thinking=False,  # 创作类润色：保留模型思考
-            )
+            resp = await self._call_with_timeout(provider, prompt)
             self._plugin._record_usage(resp, "rewrite", provider_id or "default")
             polished = str(getattr(resp, "completion_text", "") or "").strip() or raw
             _lg.getLogger("astrbot.plugin_storyteller").info(
