@@ -26,6 +26,7 @@ from .diary import DiaryStore, build_diary_prompt
 from .emoji import EmojiStore
 from .image_gen import ImageGen, detect_image_intent
 from .intercept import InterceptBuffer, SentRequestBuffer, utc_now
+from .capabilities import build_declaration, caps_done, dispatch as cap_dispatch, format_results as cap_format, parse_marks, strip_marks
 from .log import logger, setup as setup_logging
 from .memory import (
     build_commitment_prompt,
@@ -216,6 +217,7 @@ class StorytellerPlugin(Star):
         # 0.194：生成中状态（打断 + 合并重新理解）——会话 -> {"started","pending","restarts","mode","first_text"}
         self._inflight: dict[str, dict[str, Any]] = {}
         self._silence_streak: dict[str, int] = {}  # 0.195：连续沉默计数（防止判定误伤导致一直不理人）
+        self._cap_usage: dict[str, int] = {}       # 0.197：能力每日用量（key = "能力:日期"）
         try:
             self._migrate_intercept_template()
         except Exception:
@@ -2061,6 +2063,13 @@ class StorytellerPlugin(Star):
             final_system += (
                 "\n\n注意：上方就是你本人，直接以本人平常的口吻回应对方刚才说的那句。"
             )
+            # 0.197：能力声明段（接管直连不带 tools，改为告诉模型"你能做什么 + 用 [DO:能力]{json} 表达意愿"）
+            try:
+                _cap_decl = build_declaration(self, "接管")
+                if _cap_decl:
+                    final_system += "\n\n" + _cap_decl
+            except Exception as exc:
+                logger.warning("[Storyteller] 能力声明生成失败（跳过）: %s", exc)
             # 0.162 对话语义标签已改为 0.164 的 _labelize_anchors（模板内直接带标签，不再追加【本次对话】段
             # 避免"裸文本+带标签补丁"并存的重复混乱）
             # 0.165 格式工整：注入后压缩连续空行（{记忆}/{天气}/{见闻} 空时模板会留出多个空行连排）
@@ -2105,6 +2114,9 @@ class StorytellerPlugin(Star):
             # 0.194：生成 → （被打断则作废并合并重新理解）→ 润色，最多重启 max_restarts 次
             max_restarts = max(0, min(5, self.config.int("send.max_restarts", 2)))
             attempt = 0
+            # 0.197：能力执行轮次（模型请求能力 → 执行 → 结果回灌再生成），与打断合并共用同一循环
+            cap_round = 0
+            cap_max_rounds = max(0, min(4, self.config.int("capabilities.max_rounds", 1)))
             while True:
                 try:
                     from astrbot.api.event import MessageChain
@@ -2132,34 +2144,76 @@ class StorytellerPlugin(Star):
                     logger.info("[Storyteller] 接管生成内容: len=%d %s", len(content), content[:120].replace("\n", " "))  # 排查日志(临时)
                 except Exception:
                     pass
+                # 0.197：能力标记执行（文本协议）——模型写 [DO:能力]{json} → 插件执行 → 结果回灌再生成一轮
+                _again = False
+                _marks = parse_marks(content)
+                if _marks:
+                    if cap_round < cap_max_rounds:
+                        cap_round += 1
+                        _picks = _marks[:2]  # 一次最多两个，防跑飞
+                        _results = []
+                        for _name, _payload in _picks:
+                            _res = await cap_dispatch(self, event, _name, _payload)
+                            _results.append(_res)
+                            _mark = str(_res.get("mark") or "")
+                            if _mark and _mark not in content:
+                                content = f"{content} {_mark}"
+                            if not _res.get("ok"):
+                                logger.info(
+                                    "[Storyteller] 能力未成功: %s → %s（%s）",
+                                    _name, _res.get("status"), str(_res.get("message"))[:60],
+                                )
+                        content = strip_marks(content) or content
+                        _extra = cap_format(_results)
+                        logger.info(
+                            "[Storyteller] 能力执行（第%s轮）: %s",
+                            cap_round, [str(r.get("capability")) for r in _results],
+                        )
+                        try:
+                            final_system = f"{final_system}\n\n{_extra}"
+                            if accept_sys:
+                                call_kwargs["system_prompt"] = final_system
+                            else:
+                                call_prompt = f"{final_system}\n\n{send_prompt}".strip()
+                        except Exception:
+                            pass
+                        _again = True
+                    else:
+                        # 超轮次：剔除标记，直接发当前内容（不留 [DO:...] 给用户）
+                        content = strip_marks(content) or content
+                        logger.info("[Storyteller] 能力执行达上限（%s），直接发送当前回复", cap_max_rounds)
                 # 0.194：生成期间对方又发了消息 → 作废本轮结果、合并重新理解（受 max_restarts 限制）
                 _pend = self._inflight_take_pending(session_id)
-                if not _pend or attempt >= max_restarts:
-                    if _pend:
-                        logger.info(
-                            "[Storyteller] 打断重理解：重启达上限（%s），直接发送当前回复（pending=%s）",
-                            max_restarts, len(_pend),
-                        )
-                    break
-                attempt += 1
-                _joined = "\n".join(_pend)
-                logger.info(
-                    "[Storyteller] 打断重理解：作废本轮生成，合并 %s 条重新生成（第 %s 次）",
-                    len(_pend), attempt,
-                )
-                # 把新到的话并联进 system（模型重新理解整段，只回一条、先照顾最新一句）
-                try:
-                    final_system = (
-                        str(final_system)
-                        + "\n\n【对方又补充说了】\n" + _joined
-                        + "\n（把上面这些和之前那句一起理解；只回一条，先照顾最新的一句。）"
+                if _pend and attempt >= max_restarts:
+                    logger.info(
+                        "[Storyteller] 打断重理解：重启达上限（%s），直接发送当前回复（pending=%s）",
+                        max_restarts, len(_pend),
                     )
-                    if accept_sys:
-                        call_kwargs["system_prompt"] = final_system
-                    else:
-                        call_prompt = f"{final_system}\n\n{send_prompt}".strip()
-                except Exception:
-                    pass
+                    if not _again:
+                        break
+                elif not _pend:
+                    if not _again:
+                        break
+                else:
+                    attempt += 1
+                    _joined = "\n".join(_pend)
+                    logger.info(
+                        "[Storyteller] 打断重理解：作废本轮生成，合并 %s 条重新生成（第 %s 次）",
+                        len(_pend), attempt,
+                    )
+                    # 把新到的话并联进 system（模型重新理解整段，只回一条、先照顾最新一句）
+                    try:
+                        final_system = (
+                            str(final_system)
+                            + "\n\n【对方又补充说了】\n" + _joined
+                            + "\n（把上面这些和之前那句一起理解；只回一条，先照顾最新的一句。）"
+                        )
+                        if accept_sys:
+                            call_kwargs["system_prompt"] = final_system
+                        else:
+                            call_prompt = f"{final_system}\n\n{send_prompt}".strip()
+                    except Exception:
+                        pass
                 continue
             # 0.159 索要硬兜底：提示词已注入人格/身份/风格等，正常应直接回应；若模型仍索要
             # 「设定/上下文/角色」(多轮实机症状) → 带"严禁索要"重生成一次；仍索要 → 固定自然短句
@@ -2209,7 +2263,7 @@ class StorytellerPlugin(Star):
             # 0.195：回复判定（沉默/草草回复）——接管直连此前绕过判定，导致「每条消息都必回」；
             # 这里补上：判定模型认为此刻不该接话（敷衍收尾/话题自然结束/重复道别）时就不发。
             # 保险：连续沉默不超过 silence_streak_limit 次（防止误判导致一直不理人）。
-            if content and self.config.bool("pipeline.takeover_judge_enabled", True):
+            if content and self.config.bool("pipeline.takeover_judge_enabled", True) and not caps_done(event):
                 try:
                     judged = await asyncio.wait_for(
                         self.reply_pipeline.judge_for_takeover(event, content), timeout=25
@@ -2243,7 +2297,8 @@ class StorytellerPlugin(Star):
                             content = brief
                             logger.info("[Storyteller] 判定草草回复: session=%s text=%s", session_id, brief[:20])
             # 0.193：表情包判定（接管直连绕过主链判定，此前永远没有占位符 → 表情包从不发送）
-            if content:
+            # 0.197 去重：模型已通过 emoji_send 能力发过 → 不再走判定（避免双发）
+            if content and "emoji_send" not in caps_done(event):
                 try:
                     pipeline = getattr(self, "reply_pipeline", None)
                     picker = getattr(pipeline, "apply_emoji_pick", None)
@@ -2251,6 +2306,12 @@ class StorytellerPlugin(Star):
                         content = await picker(event, content)
                 except Exception as exc:
                     logger.warning("[Storyteller] 接管表情包判定异常（跳过）: %s", exc)
+            # 0.197 保险：最终文本再剔一次能力标记（任何分支都不该把 [DO:...] 发给用户）
+            if content:
+                try:
+                    content = strip_marks(content) or content
+                except Exception:
+                    pass
             sent_ok = False
             if content:
                 try:

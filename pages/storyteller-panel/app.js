@@ -3624,7 +3624,8 @@ async function renderSettings() {
   // 有专属选项卡的功能在各自页面管理（含总开关），设置页不重复展示；
   // 设置页只保留「模型配置」（全局生成策略：流式/超时/思考/回退），其它全部模块化到各页
   // 0.196：troubleshoot 已有专属顶部选项卡「清障」，设置页不再重复展示它
-  const EXCLUDED_MODULES = ["identity", "relationship", "voice", "persona", "presence", "schedule", "proactive", "emoji", "wardrobe", "debounce", "intercept", "rewrite", "memory", "vision", "pipeline", "general", "search", "mind", "send", "image", "troubleshoot"];
+  // 0.197：capabilities 通过 AstrBot 插件配置页/后续能力面板管理，暂不进设置页（避免又一次重复入口）
+  const EXCLUDED_MODULES = ["identity", "relationship", "voice", "persona", "presence", "schedule", "proactive", "emoji", "wardrobe", "debounce", "intercept", "rewrite", "memory", "vision", "pipeline", "general", "search", "mind", "send", "image", "troubleshoot", "capabilities"];
   const modules = Object.keys(schema).filter((m) => !EXCLUDED_MODULES.includes(m));
   if (!state.settingsModule || !modules.includes(state.settingsModule)) {
     state.settingsModule = modules[0] || "";

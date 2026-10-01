@@ -1171,5 +1171,48 @@
         "default": ""
       }
     }
+  },
+  "capabilities": {
+    "description": "能力（模型主动做事的清单）",
+    "type": "object",
+    "hint": "让模型知道它能主动做什么，并在需要时请求执行：接管模式下用文本协议 [DO:能力]{json}，主链模式下注册为原生工具。每项能力都可单独限次。",
+    "items": {
+      "enabled": {
+        "description": "能力清单总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后模型不再被告知任何可主动做的事（只剩被动聊天）。"
+      },
+      "max_rounds": {
+        "description": "能力执行轮次上限",
+        "type": "int",
+        "default": 1,
+        "hint": "模型请求能力后，插件执行并把结果回灌、再生成一轮的轮次上限（0=只执行不重生成；建议 1，最多 4）。轮次越多越自然，但每次多一轮模型调用。"
+      },
+      "memory_write_daily": {
+        "description": "「记住」每日上限",
+        "type": "int",
+        "default": 0,
+        "hint": "每天最多写几次长期记忆（0=不限）。"
+      },
+      "memory_recall_daily": {
+        "description": "「回忆」每日上限",
+        "type": "int",
+        "default": 0,
+        "hint": "每天最多检索几次长期记忆（0=不限）。"
+      },
+      "web_lookup_daily": {
+        "description": "「联网查」每日上限",
+        "type": "int",
+        "default": 20,
+        "hint": "每天最多联网搜索几次（0=不限）；搜索有接口成本，建议留个上限。"
+      },
+      "emoji_send_daily": {
+        "description": "「发表情」每日上限",
+        "type": "int",
+        "default": 0,
+        "hint": "每天最多主动发几次表情包（0=不限）；已有的概率闸与语境判定仍在。"
+      }
+    }
   }
 }
