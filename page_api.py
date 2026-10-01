@@ -182,6 +182,7 @@ class StorytellerWebApi:
             (f"{prefix}/config/module/update", self.config_module_update, ["POST"], "Storyteller config module update"),
             (f"{prefix}/config/module/reset", self.config_module_reset, ["POST"], "Storyteller config module reset"),
             (f"{prefix}/intercept/status", self.intercept_status, ["GET"], "Storyteller intercept status"),
+            (f"{prefix}/capabilities/status", self.capabilities_status, ["GET"], "Storyteller capability list and call log"),
             (f"{prefix}/intercept/requests", self.intercept_requests, ["GET"], "Storyteller intercepted LLM requests"),
             (f"{prefix}/intercept/user_requests", self.intercept_user_requests, ["GET"], "Storyteller intercepted user requests"),
             (f"{prefix}/intercept/clear", self.intercept_clear, ["POST"], "Storyteller intercept clear"),
@@ -261,6 +262,15 @@ class StorytellerWebApi:
             register(route, handler, methods, desc)
 
     # ------------------------------------------------------------- 生图
+
+    async def capabilities_status(self) -> Any:
+        """能力清单（0.201）：每个能力是否可用/限额/今日用量 + 最近调用记录 + 链路开关状态。"""
+        try:
+            from .capabilities import capability_view
+
+            return await _ok(capability_view(self._plugin, "接管"))
+        except Exception as exc:
+            return await _fail(f"能力清单读取失败：{exc}")
 
     async def image_status(self) -> Any:
         """生图状态：开关/后端模式/端点就绪/今日与总次数/最近记录（含缩略图预览）。"""

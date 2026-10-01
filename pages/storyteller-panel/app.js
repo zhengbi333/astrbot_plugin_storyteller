@@ -4054,6 +4054,59 @@ function placeholderHintCard(moduleKey) {
     </div>`;
 }
 
+async function loadCapabilities() {
+  // 0.201：能力清单（模型能主动做什么 / 今日用量 / 最近调用结果）——拦＆改页观测用
+  const box = $("#cap-list");
+  const sum = $("#cap-summary");
+  if (!box) return;
+  try {
+    const data = await apiGet("capabilities/status");
+    const items = data.items || [];
+    const logs = data.log || [];
+    if (sum) {
+      const stateText = data.tools_active
+        ? "原生工具已启用"
+        : data.unsupported
+          ? "提供方不支持工具 → 已回退文本协议"
+          : "原生工具未启用";
+      sum.textContent = `${stateText} · 轮次 ${data.max_rounds} · ${data.suppress_regex ? "正则已收敛" : "正则兜底生效"}`;
+    }
+    const cell = "display:inline-block;min-width:132px;vertical-align:top";
+    const rows = items
+      .map((it) => {
+        const limit = it.limit > 0 ? `${it.used_today}/${it.limit}` : it.used_today > 0 ? `${it.used_today}/不限` : "—";
+        const flag = it.implemented ? "" : "（未实现）";
+        return `<div style="padding:3px 0;border-bottom:1px dashed var(--line)">
+          <span style="${cell};font-weight:600">${esc(it.title)}${flag}</span>
+          <span style="${cell};opacity:.7">${esc(it.name)}</span>
+          <span style="${cell};opacity:.7">今日 ${esc(limit)}</span>
+          <span style="opacity:.6;font-size:12px">${esc(it.description)}</span>
+        </div>`;
+      })
+      .join("");
+    const logHtml = logs.length
+      ? logs
+          .map(
+            (r) => `<div style="padding:3px 0;border-bottom:1px dashed var(--line)">
+        <span style="${cell};opacity:.7">${esc(r.at)}</span>
+        <span style="${cell};color:${r.ok ? "var(--glow-a)" : "#ef4444"}">${r.ok ? "✓" : "✗"} ${esc(r.name)}</span>
+        <span style="${cell};opacity:.7">${esc(r.status)} · ${esc(String(r.ms))}ms</span>
+        <span style="opacity:.6;font-size:12px">${esc(r.note || "")}</span>
+      </div>`,
+          )
+          .join("")
+      : '<div class="hint">还没有调用记录。</div>';
+    box.innerHTML = `
+      <div class="hint" style="margin-bottom:6px">共 ${items.length} 项能力（钉在下面的"今日"是各能力的每日限额用量，0=不限）</div>
+      ${rows}
+      <div class="hint" style="margin:12px 0 6px">最近调用（新→旧，最多 20 条）</div>
+      ${logHtml}
+    `;
+  } catch (err) {
+    box.innerHTML = `<div class="hint">能力清单加载失败：${esc(err.message)}</div>`;
+  }
+}
+
 async function renderIntercept() {
   const view = $("#view");
   view.innerHTML = `<div class="loading">加载拦＆改…</div>`;
@@ -4121,6 +4174,17 @@ async function renderIntercept() {
           <p class="section-desc">拦截时获取到的用户当前说的话。</p>
           <div id="itc-user" class="log-view" style="max-height:22vh">加载中…</div>
         </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h3 class="panel-title">能力清单（模型能主动做的事）</h3>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span class="hint" id="cap-summary">加载中…</span>
+              <button class="btn" id="cap-refresh">刷新</button>
+            </div>
+          </div>
+          <p class="section-desc">原生工具可用时由模型自己决定何时调用（记住 / 搜一下 / 拍张照 / 改日程 / 发表情 / 分享梦…）；下方是每项能力今日用量与最近调用结果。</p>
+          <div id="cap-list" class="log-view" style="max-height:34vh">加载中…</div>
+        </section>
       </div>
       <div class="intercept-right">
         <section class="panel">
@@ -4148,6 +4212,9 @@ async function renderIntercept() {
   `;
   bindInterceptSettings();
   bindMasterSwitch("itc-enabled", "intercept", "enabled");
+  const capRefresh = $("#cap-refresh");
+  if (capRefresh) capRefresh.addEventListener("click", loadCapabilities);
+  loadCapabilities();
   $("#itc-refresh").addEventListener("click", loadIntercept);
   $("#itc-clear").addEventListener("click", async () => {
     try {

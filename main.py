@@ -220,6 +220,7 @@ class StorytellerPlugin(Star):
         self._cap_usage: dict[str, int] = {}       # 0.197：能力每日用量（key = "能力:日期"）
         self._cap_shared: dict[str, float] = {}    # 0.197：能力分享冷却（分享内心：同一条不重复念叨）
         self._native_tools_unsupported = False     # 0.200：提供方拒绝原生工具时置位 → 自动恢复正则兜底
+        self._cap_log: list[dict] = []             # 0.201：能力调用日志（面板「能力清单」观测用）
         try:
             self._migrate_intercept_template()
         except Exception:

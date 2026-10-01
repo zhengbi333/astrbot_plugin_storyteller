@@ -669,11 +669,16 @@ def strip_marks(text: str) -> str:
 
 
 async def dispatch(plugin: Any, event: Any, name: str, payload: dict) -> dict[str, Any]:
-    """执行一个能力：开关/限额/去重登记一起处理。"""
+    """执行一个能力：开关/限额/去重登记一起处理（并记一条调用日志，供面板观测）。"""
+    import time as _t
+
+    started = _t.time()
     cap = CAPABILITIES.get(name)
     if cap is None or cap.impl is None:
+        _log_call(plugin, name, "unknown", False, started, "没有这个能力")
         return {"ok": False, "status": "unknown", "message": f"没有这个能力：{name}"}
     if cap.needs_settings_write and not plugin.config.bool("general.model_edit_settings", False):
+        _log_call(plugin, name, "forbidden", False, started, "设定修改未开启")
         return {"ok": False, "status": "forbidden", "message": "设定修改未开启（总览页开关）"}
     # 每日限额
     if cap.daily_limit_key:
@@ -682,11 +687,10 @@ async def dispatch(plugin: Any, event: Any, name: str, payload: dict) -> dict[st
         except Exception:
             limit = 0
         if limit > 0:
-            import time as _t
-
             day = _t.strftime("%Y-%m-%d", _t.localtime())
             used = plugin._cap_usage.get(f"{name}:{day}", 0)
             if used >= limit:
+                _log_call(plugin, name, "limited", False, started, f"今日已达上限 {limit}")
                 return {"ok": False, "status": "limited",
                         "message": f"今天的「{cap.title}」次数用完了",
                         "next_hint": "如实说今天先不查/不弄了，别硬编。"}
@@ -699,8 +703,6 @@ async def dispatch(plugin: Any, event: Any, name: str, payload: dict) -> dict[st
     # 记额 + 去重标记
     if result.get("ok"):
         if cap.daily_limit_key:
-            import time as _t
-
             day = _t.strftime("%Y-%m-%d", _t.localtime())
             key = f"{name}:{day}"
             plugin._cap_usage[key] = int(plugin._cap_usage.get(key, 0)) + 1
@@ -713,7 +715,68 @@ async def dispatch(plugin: Any, event: Any, name: str, payload: dict) -> dict[st
         except Exception:
             pass
     result.setdefault("capability", name)
+    _log_call(plugin, name, str(result.get("status") or ""), bool(result.get("ok")), started,
+              str(result.get("message") or "")[:80])
     return result
+
+
+def _log_call(plugin: Any, name: str, status: str, ok: bool, started: float, note: str = "") -> None:
+    """记一条能力调用日志（环形，供面板「能力清单」展示）。"""
+    import time as _t
+
+    try:
+        log = getattr(plugin, "_cap_log", None)
+        if not isinstance(log, list):
+            log = []
+            plugin._cap_log = log
+        log.append({
+            "at": _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime()),
+            "name": name,
+            "status": status,
+            "ok": bool(ok),
+            "ms": int(max(0.0, _t.time() - started) * 1000),
+            "note": note,
+        })
+        del log[:-40]
+    except Exception:
+        pass
+
+
+def capability_view(plugin: Any, mode: str = "接管") -> dict[str, Any]:
+    """面板用：能力清单（开关/限额/今日用量）+ 最近调用记录。"""
+    import time as _t
+
+    day = _t.strftime("%Y-%m-%d", _t.localtime())
+    usage = getattr(plugin, "_cap_usage", {}) or {}
+    items: list[dict[str, Any]] = []
+    for cap in CAPABILITIES.values():
+        limit = 0
+        if cap.daily_limit_key:
+            try:
+                limit = max(0, int(plugin.config.int(cap.daily_limit_key, 0) or 0))
+            except Exception:
+                limit = 0
+        items.append({
+            "name": cap.name,
+            "title": cap.title,
+            "description": cap.description,
+            "modes": list(cap.modes),
+            "implemented": cap.impl is not None,
+            "limit_key": cap.daily_limit_key,
+            "limit": limit,
+            "used_today": int(usage.get(f"{cap.name}:{day}", 0) or 0),
+            "params": list(cap.params.keys()),
+            "example": cap.example,
+        })
+    return {
+        "items": items,
+        "log": list(getattr(plugin, "_cap_log", []) or [])[-20:][::-1],
+        "native_tools": bool(plugin.config.bool("capabilities.native_tools", True)),
+        "suppress_regex": bool(plugin.config.bool("capabilities.suppress_regex_fallback", True)),
+        "max_rounds": int(plugin.config.int("capabilities.max_rounds", 1) or 0),
+        "tools_active": bool(getattr(plugin, "_tools_active", lambda: False)()),
+        "unsupported": bool(getattr(plugin, "_native_tools_unsupported", False)),
+    }
 
 
 def caps_done(event: Any) -> set[str]:
