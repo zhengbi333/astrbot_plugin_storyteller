@@ -217,6 +217,165 @@ class _DirectUnavailable(RuntimeError):
     """直连不可用（环境缺 httpx / 提取不到直连信息），交由原通道处理。"""
 
 
+class _ToolsUnsupported(RuntimeError):
+    """提供方不认 tools 参数（HTTP 400/422）：调用方应去掉 tools 降级重试。
+
+    通用容错：与「关闭思考」参数同理，不同提供方对未知参数处理不一。
+    """
+
+
+def _accumulate_text(parts: list[str], text: str) -> None:
+    """把流式分片并入聚合文本（0.176 修复的规则，供带工具通道复用）。
+
+    - 完全重复块（上游重发同文本）→ 忽略；
+    - 更长的整段快照（以已聚合文本为前缀）→ 替换为全量；
+    - 其余一律追加（含"恰好是已聚合文本前缀"的短增量——真实流式按 1~8 字符输出，
+      每个对象开头的 {" 是独立分片，旧逻辑会把它当重复快照丢弃）。
+    """
+    if not text:
+        return
+    joined = "".join(parts)
+    js, ts = joined.strip(), text.strip()
+    if js and ts:
+        if ts == js:
+            return
+        if len(ts) > len(js) and ts.startswith(js):
+            parts.clear()
+            parts.append(text)
+            return
+    parts.append(text)
+
+
+def merge_tool_call_delta(calls: dict[int, dict], tc: dict) -> None:
+    """把流式 `tool_calls` 的一片增量并入累积表（按 index）。
+
+    OpenAI 兼容流式里：首片带 `id`/`function.name`，后续片只有 `function.arguments` 增量，
+    需要按 index 累积并把 arguments 字符串拼接。
+    """
+    if not isinstance(tc, dict):
+        return
+    try:
+        idx = int(tc.get("index") or 0)
+    except Exception:
+        idx = 0
+    slot = calls.setdefault(idx, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+    if tc.get("id"):
+        slot["id"] = str(tc["id"])
+    fn = tc.get("function") or {}
+    if isinstance(fn, dict):
+        if fn.get("name"):
+            slot["function"]["name"] = str(fn["name"])
+        if fn.get("arguments"):
+            slot["function"]["arguments"] += str(fn["arguments"])
+
+
+async def chat_with_tools(
+    provider: Any,
+    config: Any,
+    *,
+    messages: list[dict],
+    tools: list[dict],
+    timeout: float = 90.0,
+    disable_thinking: bool = True,
+    max_tokens: int | None = None,
+    max_think_chars: int = 12000,
+    max_chars: int = 12000,
+) -> _ChatResult:
+    """直连上游「带工具」的一次流式调用：返回 completion_text + tool_calls（已聚合）。
+
+    - 仅支持 OpenAI 兼容直连（与既有直连通道同一套信息提取）；
+    - 流式 `tool_calls` 按 index 累积：首片带 id/name，后续片只有 arguments 增量；
+    - 提供方不认 tools（400/422）→ 抛 `_ToolsUnsupported`，由调用方降级（去掉 tools 重试）；
+    - 文本聚合沿用既有「快照去重 + 思考风暴早停」规则。
+    """
+    try:
+        import httpx
+    except ImportError:
+        raise _DirectUnavailable("环境无 httpx，无法直连") from None
+    import json as _json
+
+    info = _extract_openai_direct(provider)
+    if info is None:
+        raise _DirectUnavailable("提取不到 OpenAI 兼容直连信息")
+    if not tools:
+        raise _ToolsUnsupported("没有可用工具")
+
+    body: dict = {
+        "model": info["model"],
+        "messages": list(messages or []),
+        "stream": True,
+        "tools": list(tools),
+        "tool_choice": "auto",
+    }
+    if disable_thinking:
+        body["thinking"] = {"type": "disabled"}
+    if max_tokens is not None and max_tokens > 0:
+        body["max_tokens"] = int(max_tokens)
+    url = f"{info['base_url']}/chat/completions"
+    headers = {"Authorization": f"Bearer {info['api_key']}", "Content-Type": "application/json"}
+
+    parts: list[str] = []
+    calls: dict[int, dict] = {}
+    usage = None
+    think_chars = 0
+    read_timeout = max(20.0, float(timeout))
+    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15, read=read_timeout, write=30, pool=10)) as client:
+        async with client.stream("POST", url, headers=headers, json=body) as resp:
+            if resp.status_code in (400, 422):
+                buf = await resp.aread()
+                raise _ToolsUnsupported(
+                    f"提供方不接受 tools/thinking 参数：HTTP {resp.status_code} {buf.decode('utf-8', 'replace')[:120]}"
+                )
+            if resp.status_code != 200:
+                buf = await resp.aread()
+                raise RuntimeError(f"直连上游 HTTP {resp.status_code}: {buf.decode('utf-8', 'replace')[:150]}")
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    evt = _json.loads(payload)
+                except Exception:
+                    continue
+                if evt.get("usage"):
+                    usage = evt["usage"]
+                choices = evt.get("choices") or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                delta = choice.get("delta") or {}
+                think = str(delta.get("reasoning_content") or "")
+                if think:
+                    think_chars += len(think)
+                    if think_chars > max_think_chars:
+                        raise _StreamEarlyAbort(f"模型思考过长（>{max_think_chars} 字符），已放弃本次尝试")
+                for tc in delta.get("tool_calls") or []:
+                    merge_tool_call_delta(calls, tc)
+                _accumulate_text(parts, str(delta.get("content") or ""))
+                if len("".join(parts)) > max_chars:
+                    raise _StreamEarlyAbort(f"生成内容超长（>{max_chars} 字符），已截断放弃")
+                if choice.get("finish_reason"):
+                    break
+
+    result = _ChatResult("".join(parts), _usage_from_dict(usage))
+    # tool_calls 按 index 排序后挂到结果上（空 id 的补一个占位，保证消息回填合法）
+    ordered: list[dict] = []
+    for idx in sorted(calls.keys()):
+        slot = calls[idx]
+        if not slot["function"]["name"]:
+            continue
+        if not slot["id"]:
+            slot["id"] = f"call_{idx}"
+        ordered.append(slot)
+    try:
+        result.tool_calls = ordered
+    except Exception:
+        pass
+    return result
+
+
 def _extract_openai_direct(provider: Any) -> dict | None:
     """从 AstrBot provider 对象提取 OpenAI 兼容「直连上游」所需信息。
 

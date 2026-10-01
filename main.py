@@ -26,7 +26,7 @@ from .diary import DiaryStore, build_diary_prompt
 from .emoji import EmojiStore
 from .image_gen import ImageGen, detect_image_intent
 from .intercept import InterceptBuffer, SentRequestBuffer, utc_now
-from .capabilities import build_declaration, caps_done, dispatch as cap_dispatch, format_results as cap_format, parse_marks, strip_marks
+from .capabilities import build_declaration, build_tool_schemas, cap_name_from_tool, caps_done, dispatch as cap_dispatch, format_results as cap_format, parse_marks, strip_marks
 from .log import logger, setup as setup_logging
 from .memory import (
     build_commitment_prompt,
@@ -2122,15 +2122,17 @@ class StorytellerPlugin(Star):
                 try:
                     from astrbot.api.event import MessageChain
 
-                    resp = await asyncio.wait_for(
-                        chat_text(
-                            provider,
-                            self.config,
-                            prompt=call_prompt,
-                            session_id=f"storyteller_takeover:{getattr(event, 'unified_msg_origin', '')}",
-                            **call_kwargs,
-                        ),
-                        timeout=90,
+                    # 0.199：原生工具优先（真 function calling）；不支持时自动降级（文本协议/普通生成）
+                    _cap_tools: list = []
+                    try:
+                        if self.config.bool("capabilities.enabled", True) and self.config.bool("capabilities.native_tools", True):
+                            _cap_tools = build_tool_schemas(self, "接管")
+                    except Exception as _texc:
+                        logger.warning("[Storyteller] 工具 schema 生成失败（改用文本协议）: %s", _texc)
+                        _cap_tools = []
+                    resp = await self._generate_once(
+                        provider, final_system, call_prompt, call_kwargs, accept_sys,
+                        event, _cap_tools, cap_max_rounds,
                     )
                     if not str(getattr(resp, "completion_text", "") or "").strip():
                         raise RuntimeError("接管生成返回空内容")
@@ -2373,6 +2375,117 @@ class StorytellerPlugin(Star):
                 self._inflight_end(str(getattr(event, "unified_msg_origin", "") or ""))
             except Exception:
                 pass
+
+    # ------------------------------------------------------------ 原生工具循环（0.199）
+
+    async def _generate_once(
+        self,
+        provider: Any,
+        final_system: str,
+        call_prompt: str,
+        call_kwargs: dict,
+        accept_sys: bool,
+        event: AstrMessageEvent,
+        cap_tools: list,
+        cap_rounds: int,
+    ) -> Any:
+        """一次「生成」：能带原生工具就走 tool loop（执行 → 回填 → 再生成）；否则普通直连生成。
+
+        降级链：原生工具（真 function calling）→ 文本协议/普通生成（`chat_text`），
+        任何不支持/异常都不影响回复（只记日志）。
+        """
+        from .models import _DirectUnavailable, _ToolsUnsupported
+
+        if cap_tools:
+            try:
+                return await asyncio.wait_for(
+                    self._generate_tool_loop(
+                        provider, final_system, call_prompt, accept_sys, event, cap_tools, cap_rounds
+                    ),
+                    timeout=150,
+                )
+            except _ToolsUnsupported as exc:
+                logger.info("[Storyteller] 提供方不接受原生工具，降级为文本协议/普通生成: %s", str(exc)[:100])
+            except _DirectUnavailable as exc:
+                logger.info("[Storyteller] 直连不可用，走普通生成: %s", exc)
+            except Exception as exc:
+                logger.warning("[Storyteller] 原生工具链路异常，降级为普通生成: %s", exc)
+        return await asyncio.wait_for(
+            chat_text(
+                provider,
+                self.config,
+                prompt=call_prompt,
+                session_id=f"storyteller_takeover:{getattr(event, 'unified_msg_origin', '')}",
+                **call_kwargs,
+            ),
+            timeout=90,
+        )
+
+    async def _generate_tool_loop(
+        self,
+        provider: Any,
+        final_system: str,
+        call_prompt: str,
+        accept_sys: bool,
+        event: AstrMessageEvent,
+        tools: list,
+        max_rounds: int,
+    ) -> Any:
+        """原生工具循环：请求带 tools → 有 tool_calls 就执行并回填 → 再请求（最多 max_rounds+1 轮）。
+
+        工具名统一 `story_<能力名>`，与主链模式注册的 `@filter.llm_tool` 同名；
+        执行统一走 capabilities.dispatch（限额/去重/失败如实告知都在那里）。
+        """
+        import json as _json
+
+        from .models import chat_with_tools
+
+        messages: list[dict] = []
+        if accept_sys and str(final_system or "").strip():
+            messages.append({"role": "system", "content": str(final_system)})
+        messages.append({"role": "user", "content": str(call_prompt)})
+        rounds = max(0, min(4, int(max_rounds or 0)))
+        resp: Any = None
+        for i in range(rounds + 1):
+            resp = await chat_with_tools(
+                provider, self.config,
+                messages=messages, tools=tools,
+                timeout=90, disable_thinking=True,
+            )
+            calls = list(getattr(resp, "tool_calls", None) or [])
+            if not calls:
+                return resp
+            logger.info(
+                "[Storyteller] 原生工具调用（第%s轮）: %s",
+                i + 1, [str((c.get("function") or {}).get("name") or "") for c in calls][:4],
+            )
+            messages.append({
+                "role": "assistant",
+                "content": str(getattr(resp, "completion_text", "") or ""),
+                "tool_calls": calls,
+            })
+            for c in calls[:3]:  # 一轮最多执行 3 个，防跑飞
+                fn = c.get("function") or {}
+                name = str(fn.get("name") or "")
+                raw = str(fn.get("arguments") or "{}")
+                try:
+                    payload = _json.loads(raw) if raw.strip().startswith("{") else {}
+                except Exception:
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                result = await cap_dispatch(self, event, cap_name_from_tool(name), payload)
+                logger.info(
+                    "[Storyteller] 原生工具结果: %s → %s%s",
+                    name, result.get("status"),
+                    (f"（{str(result.get('message'))[:40]}）" if not result.get("ok") else ""),
+                )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": str(c.get("id") or ""),
+                    "content": _json.dumps(result, ensure_ascii=False)[:2000],
+                })
+        return resp if resp is not None else types.SimpleNamespace(completion_text="", usage=None)
 
     def _text_chat_accepts_system_prompt(self, provider: Any) -> bool:
         """探测 provider.text_chat 是否接受 system_prompt 命名参数（兼容不同 AstrBot/provider 版本）。
