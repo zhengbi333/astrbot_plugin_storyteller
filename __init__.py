@@ -2,4 +2,4 @@
 
 PLUGIN_NAME = "astrbot_plugin_storyteller"
 PLUGIN_DISPLAY = "为你续写的故事"
-PLUGIN_VERSION = "alpha-0.195"
+PLUGIN_VERSION = "alpha-0.196"

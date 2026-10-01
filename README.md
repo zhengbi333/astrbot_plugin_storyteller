@@ -10,7 +10,7 @@
 
 - 插件名：`astrbot_plugin_storyteller`
 - 中文名：为你续写的故事
-- 版本：`alpha-0.195`
+- 版本：`alpha-0.196`
 - 兼容：AstrBot `>= 4.22.0`
 - 编码：UTF-8
 

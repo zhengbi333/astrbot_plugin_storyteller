@@ -3623,7 +3623,8 @@ async function renderSettings() {
   const schema = state.configSchema;
   // 有专属选项卡的功能在各自页面管理（含总开关），设置页不重复展示；
   // 设置页只保留「模型配置」（全局生成策略：流式/超时/思考/回退），其它全部模块化到各页
-  const EXCLUDED_MODULES = ["identity", "relationship", "voice", "persona", "presence", "schedule", "proactive", "emoji", "wardrobe", "debounce", "intercept", "rewrite", "memory", "vision", "pipeline", "general", "search", "mind", "send", "image"];
+  // 0.196：troubleshoot 已有专属顶部选项卡「清障」，设置页不再重复展示它
+  const EXCLUDED_MODULES = ["identity", "relationship", "voice", "persona", "presence", "schedule", "proactive", "emoji", "wardrobe", "debounce", "intercept", "rewrite", "memory", "vision", "pipeline", "general", "search", "mind", "send", "image", "troubleshoot"];
   const modules = Object.keys(schema).filter((m) => !EXCLUDED_MODULES.includes(m));
   if (!state.settingsModule || !modules.includes(state.settingsModule)) {
     state.settingsModule = modules[0] || "";
@@ -4807,6 +4808,18 @@ async function renderOverview() {
         </div>
       </div>
     </div>
+    <div style="display:flex;justify-content:flex-end;margin-top:16px">
+      <div class="setting-card smart-zone" style="max-width:560px">
+        ${masterSwitch(
+          "model-edit-settings",
+          "允许模型修改插件设定",
+          "默认关闭：人格注入体 / 说话风格 / 身份与防认错锚 / 拦截模板 / 防抖与发送参数 / 外观与统计 → 对模型只读，只有你能改；它的称呼与语气仍会随关系、心情自然变化（插件规则算的，不是改配置）。开启后模型可用能力调用去改这些设定（实验项，一次误调用可能改掉人设，慎用）。",
+          Boolean((cfgV.general || {}).model_edit_settings),
+          "red",
+          "实验，慎用",
+        )}
+      </div>
+    </div>
     <div class="overview-grid">
       <section class="panel overview-card">
         <div class="panel-head"><h3 class="panel-title">Bot 当前状态</h3>${moodText ? `<span class="hint">${esc(moodText)}</span>` : ""}</div>
@@ -4845,6 +4858,8 @@ async function renderOverview() {
     </div>
     ${modelWarning}
   `;
+  // 0.196：总览右上角「允许模型修改插件设定」开关（默认关：设定对模型只读）
+  await bindMasterSwitch("model-edit-settings", "general", "model_edit_settings");
 }
 
 function renderAppearance() {
