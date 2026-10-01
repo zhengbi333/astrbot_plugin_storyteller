@@ -1,4 +1,4 @@
-﻿"""能力注册表：把插件能力统一暴露给 LLM（主链工具 + 接管文本协议）。
+"""能力注册表：把插件能力统一暴露给 LLM（主链工具 + 接管文本协议）。
 
 设计要点（独立实现，不与外部插件雷同）：
 - **单一真源**：每个能力只声明一次（名称/说明/参数/适用模式/限额/是否需要设定写权限），
@@ -445,7 +445,7 @@ _register(Capability(
     description="把对方要你长期记住的内容写进长期记忆（事实/偏好/约定/待办）",
     params={"content": "要记住的内容（第三人称、精简一句）", "type": "fact|preference|promise|todo"},
     example='[DO:memory_write]{"content":"对方明天上午要去医院复查","type":"fact"}',
-    enums={"type": ["fact", "preference", "promise", "todo"]},
+    enums={"type": ["fact", "preference", "promise", "todo"]},
     daily_limit_key="capabilities.memory_write_daily",
     impl=_impl_memory_write,
 ))
@@ -497,7 +497,7 @@ _register(Capability(
     params={"action": "replace（改当天某时段）| future（未来规划）", "start": "replace 用，如 14:00",
             "activity": "做什么", "date": "future 可选，如 周六/10-05", "note": "可选备注"},
     example='[DO:schedule_edit]{"action":"replace","start":"20:00","activity":"和对方一起看动画"}',
-    enums={"action": ["replace", "future"]},
+    enums={"action": ["replace", "future"]},
     daily_limit_key="capabilities.schedule_edit_daily",
     impl=_impl_schedule_edit,
 ))
@@ -528,7 +528,7 @@ _register(Capability(
     description="这轮对话让你心情变好/变差时，让自己的情绪状态自然变化（幅度很小）",
     params={"direction": "up=变好 | down=变差", "reason": "可选，一句原因"},
     example='[DO:mood_note]{"direction":"up","reason":"被夸了"}',
-    enums={"direction": ["up", "down"]},
+    enums={"direction": ["up", "down"]},
     daily_limit_key="capabilities.mood_note_daily",
     impl=_impl_mood_note,
 ))
@@ -539,7 +539,7 @@ _register(Capability(
     description="想起自己昨晚的梦、刚刷到的见闻或最近写的日记，想跟对方说一句时用",
     params={"kind": "dream=梦 | sighting=见闻 | diary=日记"},
     example='[DO:share_inner]{"kind":"dream"}',
-    enums={"kind": ["dream", "sighting", "diary"]},
+    enums={"kind": ["dream", "sighting", "diary"]},
     daily_limit_key="capabilities.share_inner_daily",
     impl=_impl_share_inner,
 ))
@@ -587,14 +587,18 @@ def _param_schema(name: str, desc: str, enum: list[str] | None = None) -> dict:
     return {"type": "string", "description": desc}
 
 
-def build_tool_schemas(plugin: Any, mode: str) -> list[dict]:
+def build_tool_schemas(plugin: Any, mode: str, exclude: set[str] | None = None) -> list[dict]:
     """把能力清单转成 OpenAI 兼容的 tools schema（接管链路原生 function calling 用）。
 
     工具名统一 `story_<能力名>`，与主链模式注册的 `@filter.llm_tool` 同名，
-    模型在两条链路看到的能力名一致；执行时去掉前缀映射回能力。
+    模型在两条链路看到的能力名一致；执行时用 `cap_name_from_tool` 映射回能力。
+    `exclude`：本轮已由正则兜底做完的同类能力（不再给模型 → 消除双重执行）。
     """
     schemas: list[dict] = []
+    skip = {str(x) for x in (exclude or set())}
     for cap in available_capabilities(plugin, mode):
+        if cap.name in skip:
+            continue  # 本轮正则兜底已做过同类动作 → 不再给模型，避免双重执行
         props: dict[str, dict] = {}
         required: list[str] = []
         for pname, pdesc in cap.params.items():
@@ -716,6 +720,18 @@ def caps_done(event: Any) -> set[str]:
     """本轮已经通过能力做完的动作集合（供预检测去重）。"""
     done = getattr(event, "_storyteller_caps_done", None)
     return done if isinstance(done, set) else set()
+
+
+def mark_cap_done(event: Any, name: str) -> None:
+    """登记「本轮这个动作已经做过了」（正则兜底做完后调用，用于抑制同类工具/预检测）。"""
+    try:
+        done = getattr(event, "_storyteller_caps_done", None)
+        if not isinstance(done, set):
+            done = set()
+            setattr(event, "_storyteller_caps_done", done)
+        done.add(str(name))
+    except Exception:
+        pass
 
 
 def format_results(results: list[dict]) -> str:

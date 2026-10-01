@@ -26,7 +26,7 @@ from .diary import DiaryStore, build_diary_prompt
 from .emoji import EmojiStore
 from .image_gen import ImageGen, detect_image_intent
 from .intercept import InterceptBuffer, SentRequestBuffer, utc_now
-from .capabilities import build_declaration, build_tool_schemas, cap_name_from_tool, caps_done, dispatch as cap_dispatch, format_results as cap_format, parse_marks, strip_marks
+from .capabilities import build_declaration, build_tool_schemas, cap_name_from_tool, caps_done, dispatch as cap_dispatch, format_results as cap_format, mark_cap_done, parse_marks, strip_marks
 from .log import logger, setup as setup_logging
 from .memory import (
     build_commitment_prompt,
@@ -219,6 +219,7 @@ class StorytellerPlugin(Star):
         self._silence_streak: dict[str, int] = {}  # 0.195：连续沉默计数（防止判定误伤导致一直不理人）
         self._cap_usage: dict[str, int] = {}       # 0.197：能力每日用量（key = "能力:日期"）
         self._cap_shared: dict[str, float] = {}    # 0.197：能力分享冷却（分享内心：同一条不重复念叨）
+        self._native_tools_unsupported = False     # 0.200：提供方拒绝原生工具时置位 → 自动恢复正则兜底
         try:
             self._migrate_intercept_template()
         except Exception:
@@ -617,7 +618,8 @@ class StorytellerPlugin(Star):
                         logger.warning("[Storyteller] 会话搜索处理异常: %s", exc)
                 # 0.191：对话中「记住/约定」→ 同步等待真实写入长期记忆（{记忆} 锚据此确认）
                 # _observe_message 后台写先启动，此处幂等同步兜底（相同内容只写一次）
-                if self.config.bool("memory.commitment_enabled", True):
+                # 0.200：原生工具可用时收敛此正则兜底（交给模型的 memory_write 能力）
+                if self.config.bool("memory.commitment_enabled", True) and not self._suppress_regex():
                     try:
                         if detect_commitment(text):
                             await self._write_commitment(event, text)
@@ -1091,6 +1093,8 @@ class StorytellerPlugin(Star):
             # 没有拿到任何内容（无 key/无结果/归纳失败）——也如实转述，不缓存空备注
             meaning = f"（搜「{query}」没查到什么内容。如实告诉对方这次没查到，别编造。）"
         self._search_result_cache[session_id] = (meaning, query, time.time())
+        # 0.200：登记「本轮已搜过」→ 构建工具清单时移除 web_lookup（模型不会再搜一遍）
+        mark_cap_done(event, "web_lookup")
         logger.info(
             "[Storyteller] 会话搜索已缓存: session=%s query=%s note=%s字",
             session_id, query, len(meaning),
@@ -2125,8 +2129,9 @@ class StorytellerPlugin(Star):
                     # 0.199：原生工具优先（真 function calling）；不支持时自动降级（文本协议/普通生成）
                     _cap_tools: list = []
                     try:
-                        if self.config.bool("capabilities.enabled", True) and self.config.bool("capabilities.native_tools", True):
-                            _cap_tools = build_tool_schemas(self, "接管")
+                        if self.config.bool("capabilities.enabled", True) and self.config.bool("capabilities.native_tools", True) and not self._native_tools_unsupported:
+                            # 0.200：本轮正则兜底已做过的动作，不再给模型（消除双重执行）
+                            _cap_tools = build_tool_schemas(self, "接管", exclude=caps_done(event))
                     except Exception as _texc:
                         logger.warning("[Storyteller] 工具 schema 生成失败（改用文本协议）: %s", _texc)
                         _cap_tools = []
@@ -2378,6 +2383,26 @@ class StorytellerPlugin(Star):
 
     # ------------------------------------------------------------ 原生工具循环（0.199）
 
+    def _tools_active(self) -> bool:
+        """原生工具当前是否可用（配置开启 且 未被提供方拒绝过）。"""
+        try:
+            if not self.config.bool("capabilities.enabled", True):
+                return False
+            if not self.config.bool("capabilities.native_tools", True):
+                return False
+        except Exception:
+            return False
+        return not bool(getattr(self, "_native_tools_unsupported", False))
+
+    def _suppress_regex(self) -> bool:
+        """是否收敛正则兜底（0.200）：工具可用 + 开关开启 → 把同类动作交给模型自己决定。"""
+        if not self._tools_active():
+            return False
+        try:
+            return bool(self.config.bool("capabilities.suppress_regex_fallback", True))
+        except Exception:
+            return False
+
     async def _generate_once(
         self,
         provider: Any,
@@ -2405,7 +2430,11 @@ class StorytellerPlugin(Star):
                     timeout=150,
                 )
             except _ToolsUnsupported as exc:
-                logger.info("[Storyteller] 提供方不接受原生工具，降级为文本协议/普通生成: %s", str(exc)[:100])
+                # 0.200：提供方拒绝原生工具 → 永久降级（本进程内），并恢复正则兜底
+                self._native_tools_unsupported = True
+                logger.info(
+                    "[Storyteller] 提供方不接受原生工具，已降级为文本协议并恢复正则兜底: %s", str(exc)[:100]
+                )
             except _DirectUnavailable as exc:
                 logger.info("[Storyteller] 直连不可用，走普通生成: %s", exc)
             except Exception as exc:
@@ -2797,11 +2826,14 @@ class StorytellerPlugin(Star):
                 self._apply_emotion_impulse(text)
                 if self.config.bool("presence.enabled", True) and self.config.bool("presence.auto_refresh", False):
                     pass  # 情绪染色本身即轻量事件演化；大演化交给节拍
-        if detect_commitment(text) and self.config.bool("memory.commitment_enabled", True):
+        # 0.200：原生工具可用时，记忆写入与日程调整都收敛为「模型自己决定」——
+        # 正则只作为兜底（工具不可用/被提供方拒绝时自动恢复，见 _suppress_regex）
+        _regex_fallback = not self._suppress_regex()
+        if _regex_fallback and detect_commitment(text) and self.config.bool("memory.commitment_enabled", True):
             asyncio.ensure_future(self._write_commitment(event, text))
         # 实时日程/穿搭调整：对话里出现明确安排 → 像人一样决定改不改（检测门槛即闸门，不每句判定）
         try:
-            plan_kind = self._detect_plan_intent(text)
+            plan_kind = self._detect_plan_intent(text) if _regex_fallback else ""
             if plan_kind:
                 asyncio.ensure_future(self._auto_plan(event, plan_kind, text))
         except Exception:
