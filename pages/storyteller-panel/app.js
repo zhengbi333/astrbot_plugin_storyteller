@@ -175,6 +175,12 @@ function esc(value) {
   }[ch]));
 }
 
+/* 0.202：长文本截断（列表里只显示开头，完整内容放 title 悬停） */
+function clip(value, max = 42) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
 /* 异步数据填充后的轻淡入 */
 function dataIn(node) {
   if (!node) return;
@@ -382,7 +388,8 @@ async function loadHealth() {
     diagLog(`health 失败: ${e.message}`);
     showApiBanner("插件接口不可用：" + (e.message || "请求失败") + "（请确认插件已启用并重载）");
   }
-  $("#top-version").textContent = state.health ? `v${state.health.version}` : "连接失败";
+  // 0.202：版本号本身已带 "alpha-" 前缀，不再叠加 "v"（此前会显示成 "valpha-0.202"）
+  $("#top-version").textContent = state.health ? String(state.health.version || "") : "连接失败";
 }
 
 async function loadAppearance() {
@@ -4071,35 +4078,37 @@ async function loadCapabilities() {
           : "原生工具未启用";
       sum.textContent = `${stateText} · 轮次 ${data.max_rounds} · ${data.suppress_regex ? "正则已收敛" : "正则兜底生效"}`;
     }
-    const cell = "display:inline-block;min-width:132px;vertical-align:top";
     const rows = items
       .map((it) => {
         const limit = it.limit > 0 ? `${it.used_today}/${it.limit}` : it.used_today > 0 ? `${it.used_today}/不限` : "—";
-        const flag = it.implemented ? "" : "（未实现）";
-        return `<div style="padding:3px 0;border-bottom:1px dashed var(--line)">
-          <span style="${cell};font-weight:600">${esc(it.title)}${flag}</span>
-          <span style="${cell};opacity:.7">${esc(it.name)}</span>
-          <span style="${cell};opacity:.7">今日 ${esc(limit)}</span>
-          <span style="opacity:.6;font-size:12px">${esc(it.description)}</span>
+        const full = it.limit > 0 && it.used_today >= it.limit;
+        return `<div style="padding:5px 0;border-bottom:1px dashed var(--line)">
+          <div style="display:flex;align-items:baseline;gap:8px;white-space:nowrap;overflow:hidden">
+            <span style="font-weight:600">${esc(it.title)}</span>
+            <span style="opacity:.55;font-size:12px">${esc(it.name)}</span>
+            <span style="margin-left:auto;font-size:12px;opacity:${full ? "1" : ".65"};color:${full ? "#ef4444" : "inherit"}">今日 ${esc(limit)}</span>
+          </div>
+          <div style="font-size:12px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
+               title="${esc(it.description)}${it.example ? " · 示例：" + esc(it.example) : ""}">${esc(it.description)}</div>
         </div>`;
       })
       .join("");
     const logHtml = logs.length
       ? logs
           .map(
-            (r) => `<div style="padding:3px 0;border-bottom:1px dashed var(--line)">
-        <span style="${cell};opacity:.7">${esc(r.at)}</span>
-        <span style="${cell};color:${r.ok ? "var(--glow-a)" : "#ef4444"}">${r.ok ? "✓" : "✗"} ${esc(r.name)}</span>
-        <span style="${cell};opacity:.7">${esc(r.status)} · ${esc(String(r.ms))}ms</span>
-        <span style="opacity:.6;font-size:12px">${esc(r.note || "")}</span>
+            (r) => `<div style="display:flex;align-items:baseline;gap:8px;padding:4px 0;border-bottom:1px dashed var(--line);font-size:12px;white-space:nowrap;overflow:hidden">
+        <span style="opacity:.6">${esc(clip(String(r.at || "").replace(/^\d{4}-/, ""), 14))}</span>
+        <span style="color:${r.ok ? "var(--glow-a)" : "#ef4444"}">${r.ok ? "✓" : "✗"} ${esc(r.name)}</span>
+        <span style="opacity:.6">${esc(r.status)} · ${esc(String(r.ms))}ms</span>
+        <span style="opacity:.45;overflow:hidden;text-overflow:ellipsis">${esc(clip(r.note || "", 28))}</span>
       </div>`,
           )
           .join("")
-      : '<div class="hint">还没有调用记录。</div>';
+      : '<div class="hint" style="padding:6px 0">还没有调用记录。</div>';
     box.innerHTML = `
-      <div class="hint" style="margin-bottom:6px">共 ${items.length} 项能力（钉在下面的"今日"是各能力的每日限额用量，0=不限）</div>
+      <div style="font-size:12px;opacity:.6;padding:2px 0 6px">共 ${items.length} 项能力（右侧"今日"为每日限额用量，0=不限）</div>
       ${rows}
-      <div class="hint" style="margin:12px 0 6px">最近调用（新→旧，最多 20 条）</div>
+      <div style="font-size:12px;opacity:.6;padding:10px 0 4px">最近调用（新→旧）</div>
       ${logHtml}
     `;
   } catch (err) {
@@ -4183,7 +4192,7 @@ async function renderIntercept() {
             </div>
           </div>
           <p class="section-desc">原生工具可用时由模型自己决定何时调用（记住 / 搜一下 / 拍张照 / 改日程 / 发表情 / 分享梦…）；下方是每项能力今日用量与最近调用结果。</p>
-          <div id="cap-list" class="log-view" style="max-height:34vh">加载中…</div>
+          <div id="cap-list" style="max-height:360px;overflow-y:auto;padding-right:4px">加载中…</div>
         </section>
       </div>
       <div class="intercept-right">
@@ -4448,16 +4457,26 @@ async function renderImage() {
           <div id="img-test-result" class="hint" style="margin-top:8px">（未生成）</div>
         </section>
         <section class="panel" style="margin-top:16px">
-          <div class="panel-head"><h3 class="panel-title">最近生成</h3><span class="hint">${records.length} 条${records.some((r) => r.thumb) ? " · 点击缩略图看大图" : ""}</span></div>
-          ${records.map((r) => `
-            <div class="field" style="display:flex;gap:12px;align-items:flex-start">
-              ${r.thumb ? `<img class="img-thumb" src="${esc(r.thumb)}" data-full="${esc(r.full || r.thumb)}" title="点击查看大图" style="width:84px;height:84px;flex-shrink:0;object-fit:cover;border-radius:8px;border:1px solid var(--line);cursor:zoom-in;background:rgba(0,0,0,.04)" />` : `<div style="width:84px;height:84px;flex-shrink:0;border-radius:8px;border:1px dashed var(--line);display:flex;align-items:center;justify-content:center;font-size:11px;opacity:.5">无预览</div>`}
-              <div style="min-width:0;flex:1">
-                <div class="hint" style="color:var(--ink)">${esc(String(r.time || ""))} · ${r.ok ? "✅" : "❌"} ${esc(String(r.kind || ""))}</div>
-                <div class="hint" style="opacity:.7">${esc(String(r.prompt || ""))}${r.note ? " — " + esc(String(r.note)) : ""}</div>
-                <div class="hint" style="opacity:.55">${Number(r.elapsed_ms || 0)}ms${r.name ? " · " + esc(String(r.name)) : ""}</div>
-              </div>
-            </div>`).join("") || '<div class="hint">还没有生成记录。</div>'}
+          <div class="panel-head">
+            <h3 class="panel-title">最近生成</h3>
+            <span class="hint">${records.length} 条 · 滚动查看${records.some((r) => r.thumb) ? " · 点缩略图看大图" : ""}</span>
+          </div>
+          <div style="max-height:296px;overflow-y:auto;padding-right:4px">
+            ${records.map((r) => `
+              <div style="display:flex;gap:10px;align-items:center;padding:6px 0;border-bottom:1px dashed var(--line)">
+                ${r.thumb ? `<img class="img-thumb" src="${esc(r.thumb)}" data-full="${esc(r.full || r.thumb)}" title="点击查看大图" style="width:54px;height:54px;flex-shrink:0;object-fit:cover;border-radius:7px;border:1px solid var(--line);cursor:zoom-in;background:rgba(0,0,0,.04)" />` : `<div style="width:54px;height:54px;flex-shrink:0;border-radius:7px;border:1px dashed var(--line);display:flex;align-items:center;justify-content:center;font-size:10px;opacity:.5">无预览</div>`}
+                <div style="min-width:0;flex:1">
+                  <div class="hint" style="color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
+                       title="${esc(String(r.prompt || ""))}${r.note ? " — " + esc(String(r.note)) : ""}">
+                    ${r.ok ? "✅" : "❌"} ${esc(clip(r.prompt || "（无描述）", 40))}${r.note ? ` <span style="opacity:.6">— ${esc(clip(r.note, 16))}</span>` : ""}
+                  </div>
+                  <div class="hint" style="opacity:.55;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
+                       title="${esc(String(r.time || ""))}${r.name ? " · " + esc(String(r.name)) : ""}">
+                    ${esc(clip(String(r.time || "").replace(/^\d{4}-/, ""), 14))} · ${esc(String(r.kind || ""))} · ${Number(r.elapsed_ms || 0)}ms
+                  </div>
+                </div>
+              </div>`).join("") || '<div class="hint">还没有生成记录。</div>'}
+          </div>
         </section>
         <section class="panel" style="margin-top:16px">
           <div class="panel-head"><h3 class="panel-title">智能判定</h3><span class="hint">A 规则 → B 仲裁</span></div>
@@ -4857,7 +4876,7 @@ async function renderOverview() {
       <b>⚠ 尚未配置模型</b> — 当前「${esc(itcMode)}」模式下，接管请求将按「接管失败时」策略处理（默认降级放行主链，Bot 仍会回复但不定制拟人化）。到<b>「模型」</b>页配置回退模型即可获得完整拟人化效果。
     </section>` : "";
   view.innerHTML = `
-    <div class="hero">
+    <div class="hero" style="position:relative">
       <div class="eyebrow">Storyteller Companion</div>
       <h1>为你续写的故事</h1>
       <p>赐予真正的陪伴和生命——这是我们共同的愿望。</p>
@@ -4875,13 +4894,12 @@ async function renderOverview() {
           <div class="v" style="font-size:13px;padding-top:4px">${esc(health.data_dir || "-")}</div>
         </div>
       </div>
-    </div>
-    <div style="display:flex;justify-content:flex-end;margin-top:16px">
-      <div class="setting-card smart-zone" style="max-width:560px">
+      <div class="setting-card smart-zone" style="position:absolute;top:2px;right:0;width:min(48%,660px)"
+           title="默认关闭：人格注入体 / 说话风格 / 身份与防认错锚 / 拦截模板 / 防抖与发送参数 / 外观与统计 → 对模型只读，只有你能改；它的称呼与语气仍会随关系、心情自然变化（插件规则算的，不是改配置）。开启后模型可用能力调用去改这些设定（实验项，一次误调用可能改掉人设，慎用）。">
         ${masterSwitch(
           "model-edit-settings",
           "允许模型修改插件设定",
-          "默认关闭：人格注入体 / 说话风格 / 身份与防认错锚 / 拦截模板 / 防抖与发送参数 / 外观与统计 → 对模型只读，只有你能改；它的称呼与语气仍会随关系、心情自然变化（插件规则算的，不是改配置）。开启后模型可用能力调用去改这些设定（实验项，一次误调用可能改掉人设，慎用）。",
+          "默认关：人格 / 风格 / 身份锚 / 拦截模板 / 防抖等设定对模型只读。开启后模型可用能力改它们（悬停看详情）。",
           Boolean((cfgV.general || {}).model_edit_settings),
           "red",
           "实验，慎用",
@@ -5202,6 +5220,16 @@ function bindAppearanceEvents() {
 
 async function boot() {
   diagLog("页面启动");
+  // 0.202：支持 #page=xxx 深链（刷新后回到同一页；也便于本地预览/截图定位）
+  try {
+    const m = /(?:^|[#&?])page=([a-zA-Z_]+)/.exec(String(location.hash || ""));
+    if (m && NAV.some((t) => t.key === m[1])) {
+      state.current = m[1];
+      diagLog(`深链指定页面: ${m[1]}`);
+    }
+  } catch (e) {
+    /* 忽略：深链只是便利功能 */
+  }
   try {
     await bridge.ready();
     diagLog("bridge ready 完成");
