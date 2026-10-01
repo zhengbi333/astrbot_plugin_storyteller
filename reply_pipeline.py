@@ -97,6 +97,20 @@ def build_judge_prompt(rewritten: str, user_text: str, presence: str, categories
     return "\n".join(lines)
 
 
+def build_emoji_prompt(reply_text: str, user_text: str, categories: list[str]) -> str:
+    """0.193：接管改换链路的「是否配表情包」轻量判定（只判表情包，不改文本）。"""
+    cat_hint = "、".join(f"「{c}」" for c in categories) if categories else "（无可用分类）"
+    return "\n".join([
+        "判断下面这条准备好的回复，此刻是否适合再配一张表情包（多数时候不需要，只在情绪/语气确实到位时才配）。",
+        "只输出一个 JSON 对象，不要解释、不要代码块：",
+        '{"emoji": [{"category": "分类标题", "position": "start|end"}]}',
+        '不适合就输出 {"emoji": []}。',
+        f"- 可用分类（必须从中选，不要编造）：{cat_hint}",
+        f"- 对方刚说：{user_text[:200]}",
+        f"- 准备回复：{reply_text[:600]}",
+    ])
+
+
 def parse_judge(text: str) -> dict[str, Any] | None:
     if not text:
         return None
@@ -130,6 +144,125 @@ class ReplyPipeline:
             return [str(c.get("title") or "") for c in self._plugin.emoji_store.categories()]
         except Exception:
             return []
+
+    def _usable_categories(self) -> list[str]:
+        """0.193：只返回「真的还有图片」的分类（空分类配不出来，别让模型白选）。"""
+        store = getattr(self._plugin, "emoji_store", None)
+        if store is None:
+            return []
+        out: list[str] = []
+        for cat in self._categories():
+            try:
+                cid = store._title_to_id(cat)
+                if cid and store._files(cid):
+                    out.append(cat)
+            except Exception:
+                continue
+        return out
+
+    def _emoji_allowed(self, text: str, event: Any) -> bool:
+        """发送闸门：用户 opt-out 直接拒；否则按 emoji.send_probability（含反馈权重）抽签。"""
+        import random
+
+        store = getattr(self._plugin, "emoji_store", None)
+        user = ""
+        try:
+            from .persona import extract_sender
+
+            user = extract_sender(event).get("user_id") or ""
+        except Exception:
+            user = ""
+        if not user:
+            # 兜底：直接从事件/消息对象取发送者 ID（部分平台事件无 get_sender_id）
+            try:
+                getter = getattr(event, "get_sender_id", None)
+                if callable(getter):
+                    user = str(getter() or "")
+                if not user:
+                    sender = getattr(getattr(event, "message_obj", None), "sender", None)
+                    user = str(getattr(sender, "user_id", "") or "")
+            except Exception:
+                user = ""
+        if store is not None:
+            try:
+                if store.is_opt_out(user):
+                    return False
+            except Exception:
+                pass
+        try:
+            prob = max(0.0, min(1.0, float(self._config().float("emoji.send_probability", 0.25))))
+        except Exception:
+            prob = 0.25
+        if store is not None and user:
+            try:
+                weights = []
+                for m in EMOJI_PATTERN.finditer(text):
+                    title = str(m.group(1) or "").strip()
+                    cid = store._title_to_id(title)
+                    if cid:
+                        weights.append(store.weight_for(user, cid))
+                if weights:
+                    prob = max(0.0, min(1.0, prob * (sum(weights) / len(weights))))
+            except Exception:
+                pass
+        return random.random() <= prob
+
+    async def apply_emoji_pick(self, event: Any, text: str) -> str:
+        """0.193：接管改换链路专用——判定「这轮要不要配表情包」，命中则插入 [EMOJI:分类] 占位符。
+
+        主链路径由 process() 的判定模型一并完成；接管是插件直连生成、绕过判定，此前永远
+        没有占位符可渲染（用户实测「表情包不会被发送」的根因）。这里补上这一步：
+        有图的分类才参选 → 轻量判定 → 概率/opt-out/权重闸门 → 插入占位符（渲染仍走原链路）。
+        """
+        if not text or EMOJI_PATTERN.search(text):
+            return text
+        try:
+            if not self._config().bool("emoji.enabled", True):
+                return text
+        except Exception:
+            return text
+        categories = self._usable_categories()
+        if not categories:
+            return text
+        provider, provider_id = resolve_chat_provider(self._plugin.context, self._config(), "emoji_judge")
+        if provider is None:
+            provider, provider_id = resolve_chat_provider(self._plugin.context, self._config(), "judge")
+        if provider is None:
+            return text
+        user_text = ""
+        try:
+            user_text = str(getattr(event, "message_str", "") or "").strip()
+        except Exception:
+            user_text = ""
+        try:
+            resp = await chat_text(
+                provider, self._config(),
+                prompt=build_emoji_prompt(text, user_text, categories),
+                session_id="storyteller_emoji_pick",
+            )
+            self._record("emoji_judge", provider_id or "default", resp)
+            data = parse_judge(str(getattr(resp, "completion_text", "") or ""))
+            picks = (data or {}).get("emoji") if isinstance(data, dict) else None
+            if not isinstance(picks, list) or not picks:
+                return text
+            first = picks[0] if isinstance(picks[0], dict) else {}
+            title = str(first.get("category") or "").strip()
+            position = str(first.get("position") or "end").strip().lower()
+            if title not in categories:
+                # 容错：模型写了个近似名字（含/被含）也认
+                title = next((c for c in categories if c and (c in title or title in c)), "")
+            if not title:
+                return text
+            placeholder = f"[EMOJI:{title}]"
+            if not self._emoji_allowed(placeholder, event):
+                logger.info("[Storyteller] 表情包判定命中但概率闸未过: %s", title)
+                return text
+            out = f"{placeholder} {text}" if position == "start" else f"{text} {placeholder}"
+            logger.info("[Storyteller] 表情包已插入占位符: category=%s position=%s", title, position)
+            return out
+        except Exception as exc:
+            logger.warning("[Storyteller] 表情包判定失败（跳过）: %s", exc)
+            return text
 
     def _presence_text(self) -> str:
         try:

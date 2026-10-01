@@ -225,8 +225,85 @@ class ImageGen:
             "time": _now(), "date": _today(), "kind": kind,
             "prompt": prompt[:300], "ok": bool(path), "note": note[:200],
             "elapsed_ms": elapsed_ms, "path": path[-160:],
+            # 0.193：记录文件名，供面板缩略图预览（记录里的 path 可能被截断）
+            "name": Path(path).name if path else "",
         })
         return path, note
+
+    # ------------------------------------------------------------- 面板预览（0.193）
+
+    def _image_path(self, name: str) -> Path | None:
+        """按文件名在 image_gen 目录内定位图片（防目录穿越：只取 basename）。"""
+        raw = str(name or "").strip()
+        if not raw:
+            return None
+        safe = Path(raw).name
+        if not safe or safe in (".", ".."):
+            return None
+        path = Path(self._data_dir) / safe  # _data_dir 已经是 <plugin_data>/image_gen
+        try:
+            if path.exists() and path.is_file():
+                return path
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _data_url(path: Path, *, max_px: int, quality: int = 78) -> str:
+        """把图片转成 data URL（按 max_px 缩放，供面板 <img> 直接显示）；失败返回空串。"""
+        import base64
+        import mimetypes
+
+        try:
+            raw = path.read_bytes()
+        except Exception:
+            return ""
+        # 优先用 PIL 缩放到指定尺寸（面板预览体积可控）
+        try:
+            from io import BytesIO
+
+            from PIL import Image
+
+            with Image.open(BytesIO(raw)) as im:
+                im = im.convert("RGB") if im.mode not in ("RGB", "L") else im
+                im.thumbnail((max_px, max_px))
+                buf = BytesIO()
+                im.save(buf, format="JPEG", quality=quality, optimize=True)
+            return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+        except Exception:
+            pass
+        # 无 PIL 兜底：小图原样内嵌（大图不预览，避免页面被撑爆）
+        if len(raw) <= 200 * 1024:
+            mime = mimetypes.guess_type(path.name)[0] or "image/png"
+            return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+        return ""
+
+    def preview_for(self, name: str) -> dict[str, str]:
+        """返回 {thumb, full}（两种尺寸的 data URL）；取不到则为空串。"""
+        path = self._image_path(name)
+        if path is None:
+            return {"thumb": "", "full": ""}
+        return {
+            "thumb": self._data_url(path, max_px=200, quality=72),
+            "full": self._data_url(path, max_px=1280, quality=82),
+        }
+
+    def recent_with_preview(self, limit: int = 12) -> list[dict[str, Any]]:
+        """最近生成记录 + 缩略图（面板预览用）。"""
+        out: list[dict[str, Any]] = []
+        for rec in self.recent(limit):
+            item = dict(rec)
+            name = str(item.get("name") or "") or Path(str(item.get("path") or "")).name
+            if item.get("ok") and name:
+                item["name"] = name
+                preview = self.preview_for(name)
+                item["thumb"] = preview["thumb"]
+                item["full"] = preview["full"]
+            else:
+                item["thumb"] = ""
+                item["full"] = ""
+            out.append(item)
+        return out
 
     async def _generate_via_api(self, prompt: str, *, size: str, reference_path: str) -> tuple[str, str]:
         endpoints = [ep for ep in self._endpoints()]

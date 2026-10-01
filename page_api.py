@@ -263,11 +263,14 @@ class StorytellerWebApi:
     # ------------------------------------------------------------- 生图
 
     async def image_status(self) -> Any:
-        """生图状态：开关/后端模式/端点就绪/今日与总次数/最近记录。"""
+        """生图状态：开关/后端模式/端点就绪/今日与总次数/最近记录（含缩略图预览）。"""
         gen = getattr(self._plugin, "image_gen", None)
         if gen is None:
             return await _fail("生图模块未初始化")
-        return await _ok({"status": gen.stats(), "records": gen.recent(20)})
+        # 0.193：最近记录附缩略图/大图 data URL（控制台里能直接看到生成结果）
+        fetch = getattr(gen, "recent_with_preview", None)
+        records = fetch(20) if callable(fetch) else gen.recent(20)
+        return await _ok({"status": gen.stats(), "records": records})
 
     async def image_generate(self) -> Any:
         """试生成一张（前端测试）：prompt 必填；返回 ok 与说明/路径。"""
@@ -1953,12 +1956,29 @@ class StorytellerWebApi:
             cid = str(_query("cid", "") or "").strip()
         if not cid:
             return await _fail("缺少分类 id")
+        # 0.193：分类必须真实存在，避免文件落进「幽灵目录」（写了也永远发不出来）
+        try:
+            known = {str(c.get("id") or "") for c in self._plugin.emoji_store.categories()}
+            if cid not in known:
+                logger.warning("[Storyteller] 表情包上传：分类不存在 cid=%s filename=%s", cid, filename)
+                return await _fail(f"分类不存在（{cid}）——请刷新页面后重试")
+        except Exception:
+            pass
         try:
             content = await self._read_upload(upload)
+            if not content:
+                logger.warning("[Storyteller] 表情包上传：文件内容为空 filename=%s", filename)
+                return await _fail("文件内容为空（上传通道可能未正确传递文件）")
             result = self._plugin.emoji_store.add_emoji(cid, filename, content)
+            logger.info(
+                "[Storyteller] 表情包上传成功: cid=%s file=%s bytes=%s total=%s",
+                cid, result.get("file"), len(content), result.get("count"),
+            )
         except ValueError as exc:
+            logger.warning("[Storyteller] 表情包上传失败(格式): cid=%s %s", cid, exc)
             return await _fail(str(exc))
         except Exception as exc:
+            logger.warning("[Storyteller] 表情包上传失败: cid=%s %s", cid, exc)
             return await _fail(f"上传失败: {exc}")
         return await _ok(result)
 

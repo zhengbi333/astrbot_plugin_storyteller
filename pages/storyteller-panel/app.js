@@ -1112,7 +1112,7 @@ async function renderRelationships() {
               <div class="rel-item ${sel && r.user_id === sel.user_id ? "active" : ""}" data-rel="${esc(r.user_id)}">
                 <div class="rel-item-top"><span class="rel-item-name">${esc(r.address || r.user_id)}</span><span class="hint">${esc(r.stage)} · ${esc(r.tier)}</span></div>
                 <div class="progress"><div class="progress-fill" style="width:${pct(r.affection)}%"></div></div>
-                <div class="hint">好感 ${pct(r.affection)}% · 互动 ${r.interactions} 次${r.impression ? " · " + esc(r.impression.slice(0, 20)) : ""}</div>
+                <div class="hint">好感 ${pct(r.affection)}% · 互动 ${r.interactions} 次${r.idle_days !== null && r.idle_days !== undefined ? ` · ${r.idle_days < 1 ? "今天聊过" : `已 ${Math.floor(r.idle_days)} 天未互动`}` : ""}${r.impression ? " · " + esc(r.impression.slice(0, 20)) : ""}</div>
               </div>`).join("") : '<div class="hint">还没有关系记录，聊起来就有了。</div>'}
           </div>
         </section>
@@ -1163,7 +1163,7 @@ async function renderRelationships() {
       toast("已保存");
       state.relSelected = sel.user_id;
       await reloadConfig();
-      await renderRelationships();
+      await rerenderPage("relationship", renderRelationships);
     } catch (err) { toast(`保存失败：${err.message}`, "err"); }
   });
   const prevBtn = document.getElementById("rel-preview-anchor");
@@ -1382,7 +1382,7 @@ async function renderVoice() {
       const res = await runWithBusy(genBtn, "生成中…", () => apiPost("voice/generate", { persona_desc: persona }));
       state.voice = res.voice || {};
       toast("已生成并保存");
-      await renderVoice();
+      await rerenderPage("voice", renderVoice);
     } catch (err) {
       toast(`生成失败：${err.message}`, "err");
     }
@@ -1436,7 +1436,7 @@ async function renderPersona() {
               <select class="input" id="p-persona-select"><option value="">（加载中…）</option></select>
             </div>
           </div>
-          <textarea id="p-desc" class="template-editor" spellcheck="false" placeholder="例如：你是洛洛，一个温柔但偶尔毒舌的学姐，来自……"></textarea>
+          <textarea id="p-desc" class="template-editor" spellcheck="false" placeholder="例如：一位温柔但偶尔毒舌的学姐，说话简短、爱用反问，喜欢在深夜聊天，来自一座临海的小城……（写清角色的性格、说话习惯与背景即可）"></textarea>
           <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
             <button class="btn" id="p-generate">一键生成</button>
             <span class="hint">生成「{人格}」注入体（名字/身份/世界观…）并自动保存。</span>
@@ -1493,7 +1493,7 @@ async function renderPersona() {
     try {
       await runWithBusy(genBtn, "生成中…", () => apiPost("persona/generate", { persona_desc: desc }));
       toast("已生成并保存");
-      await renderPersona();
+      await rerenderPage("persona", renderPersona);
     } catch (err) {
       toast(`生成失败：${err.message}`, "err");
     }
@@ -1509,7 +1509,7 @@ async function renderPersona() {
     try {
       await apiPost("persona/update", { text: "" });
       toast("已清空，{人格} 回退 AstrBot 默认人格");
-      await renderPersona();
+      await rerenderPage("persona", renderPersona);
     } catch (err) { toast(`清空失败：${err.message}`, "err"); }
   });
 }
@@ -1679,7 +1679,7 @@ async function loadVoiceExamples() {
         if (!ex) return;
         state.voice = ex.voice || {};
         await saveVoice();
-        await renderVoice();
+        await rerenderPage("voice", renderVoice);
       });
     });
   } catch (err) {
@@ -1822,7 +1822,7 @@ async function renderPresence() {
       const res = await apiPost("presence/update", body);
       state.presence = res.presence || {};
       toast("已应用并重算语气走廊");
-      await renderPresence();
+      await rerenderPage("presence", renderPresence);
     } catch (err) { toast(`应用失败：${err.message}`, "err"); }
   });
   const genBtn = document.getElementById("pr-evolve");
@@ -1833,7 +1833,7 @@ async function renderPresence() {
       const res = await apiPost("presence/evolve", {});
       state.presence = res.presence || {};
       toast("已演化并保存");
-      await renderPresence();
+      await rerenderPage("presence", renderPresence);
     } catch (err) {
       toast(`演化失败：${err.message}`, "err");
       genBtn.disabled = false;
@@ -2010,7 +2010,7 @@ async function renderSchedule() {
       try {
         await runWithBusy(genBtn, "生成中…", () => apiPost("schedule/generate", {}));
         toast("已生成并保存");
-        await renderSchedule();
+        await rerenderPage("schedule", renderSchedule);
       } catch (err) {
         toast(`生成失败：${err.message}`, "err");
       }
@@ -2221,7 +2221,7 @@ async function renderWardrobe() {
         try {
           await apiPost("wardrobe/closet/remove", { name: node.dataset.delItem });
           toast("已删除");
-          await renderWardrobe();
+          await rerenderPage("wardrobe", renderWardrobe);
         } catch (err) { toast(`删除失败：${err.message}`, "err"); }
       });
     });
@@ -2230,7 +2230,7 @@ async function renderWardrobe() {
         try {
           await apiPost("wardrobe/pin", { item_id: node.dataset.pinItem, manual: node.dataset.manual !== "1" });
           toast("已更新标记");
-          await renderWardrobe();
+          await rerenderPage("wardrobe", renderWardrobe);
         } catch (err) { toast(`标记失败：${err.message}`, "err"); }
       });
     });
@@ -2275,7 +2275,7 @@ async function renderWardrobe() {
           previewItems = state.wardrobePreview;
           renderPreview();
           toast(`已加入衣柜：${String(item.name || "").slice(0, 20)}`);
-          await renderWardrobe();
+          await rerenderPage("wardrobe", renderWardrobe);
         } catch (err) {
           toast(err.message || "应用失败（衣柜可能已满）", "err");
         }
@@ -2313,7 +2313,7 @@ async function renderWardrobe() {
       try {
         await runWithBusy(replaceAllBtn, "置换中…", () => apiPost("wardrobe/replace_all", {}));
         toast("已置换衣柜（重要衣物保留）");
-        await renderWardrobe();
+        await rerenderPage("wardrobe", renderWardrobe);
       } catch (err) {
         toast(`置换失败：${err.message}`, "err");
       }
@@ -2339,7 +2339,7 @@ async function renderWardrobe() {
     try {
       await runWithBusy(genOutfitBtn, "生成中…", () => apiPost("wardrobe/generate", {}));
       toast("已生成穿搭并保存");
-      await renderWardrobe();
+      await rerenderPage("wardrobe", renderWardrobe);
     } catch (err) {
       toast(`生成失败：${err.message}`, "err");
     }
@@ -2352,7 +2352,7 @@ async function renderWardrobe() {
     try {
       await apiPost("wardrobe/closet/add", { name, category });
       toast("已添加（重要）");
-      await renderWardrobe();
+      await rerenderPage("wardrobe", renderWardrobe);
     } catch (err) { toast(`添加失败：${err.message}`, "err"); }
   });
   await bindMasterSwitch("wardrobe-enabled", "wardrobe", "enabled");
@@ -2994,7 +2994,7 @@ async function renderProactive() {
     try {
       await apiPost("proactive/trigger", {});
       toast("已尝试发送，稍等结果…");
-      await renderProactive();
+      await rerenderPage("proactive", renderProactive);
       // 异步生成：轮询几次直到出现「沉默/已发送/失败」等终态，自动刷新
       let tries = 0;
       const poll = setInterval(async () => {
@@ -3005,9 +3005,9 @@ async function renderProactive() {
           const done = last && ["sent", "silent", "send_failed", "blocked"].includes(last.outcome);
           if (done || tries >= 6) {
             clearInterval(poll);
-            await renderProactive();
+            await rerenderPage("proactive", renderProactive);
           } else {
-            await renderProactive();
+            await rerenderPage("proactive", renderProactive);
           }
         } catch (err) { clearInterval(poll); }
       }, 1200);
@@ -3045,7 +3045,7 @@ async function renderProactive() {
     try {
       await apiPost("proactive/targets", { action: "add", id: v });
       toast("已添加");
-      await renderProactive();
+      await rerenderPage("proactive", renderProactive);
     } catch (err) { toast(`添加失败：${err.message}`, "err"); }
   });
   // 主动模板保存
@@ -3086,7 +3086,7 @@ async function renderProactive() {
       try {
         await apiPost("proactive/targets", { action: "remove", id: node.dataset.proTargetDel });
         toast("已删除");
-        await renderProactive();
+        await rerenderPage("proactive", renderProactive);
       } catch (err) { toast(`删除失败：${err.message}`, "err"); }
     });
   });
@@ -3448,7 +3448,7 @@ async function renderEmoji() {
                   <div style="position:relative;display:inline-block;margin:2px">
                     <img src="${esc(f.data_url)}" style="width:64px;height:64px;object-fit:contain;border-radius:6px;border:1px solid var(--line);background:rgba(0,0,0,.04)" title="${esc(f.name)}">
                     <button class="btn" data-del-emoji="${esc(c.id)}|${esc(f.name)}" style="position:absolute;top:-6px;right:-6px;padding:0 6px;font-size:10px;line-height:1.7;border-radius:50%" title="删除这张">×</button>
-                  </div>`).join("") || (c.count ? '<div class="hint">（已导入但无预览——单张超过 2MB 的不展示预览，仍可删除）</div>' : "")}
+                  </div>`).join("") || (c.count ? '<div class="hint">（已导入但无预览——单张超过 2MB 的不展示预览，仍可删除）</div>' : '<div class="hint" style="color:var(--warn, #d97706)">这个分类还没有图片——表情包不会被发送，请用下方「上传图片」加几张。</div>')}
                 ${c.preview_total > (c.files || []).length ? `<div class="hint" style="opacity:.6">还有 ${c.preview_total - (c.files || []).length} 张未显示（每分类最多预览 8 张）</div>` : ""}
               </div>
               <div class="field-row" style="gap:6px">
@@ -3509,7 +3509,7 @@ async function renderEmoji() {
     try {
       await apiPost("emoji/category/add", { title, description });
       toast("已添加");
-      await renderEmoji();
+      await rerenderPage("emoji", renderEmoji);
     } catch (err) { toast(`添加失败：${err.message}`, "err"); }
   });
   view.querySelectorAll("[data-del-cat]").forEach((node) => {
@@ -3517,7 +3517,7 @@ async function renderEmoji() {
       try {
         await apiPost("emoji/category/remove", { id: node.dataset.delCat });
         toast("已删除");
-        await renderEmoji();
+        await rerenderPage("emoji", renderEmoji);
       } catch (err) { toast(`删除失败：${err.message}`, "err"); }
     });
   });
@@ -3548,7 +3548,7 @@ async function renderEmoji() {
           await apiPost("emoji/category/update", { id: cid, title: newTitle, description: newDesc });
           toast("已保存");
           closeModal();
-          await renderEmoji();
+          await rerenderPage("emoji", renderEmoji);
         } catch (err) { toast(`保存失败：${err.message}`, "err"); }
       });
     });
@@ -3561,7 +3561,7 @@ async function renderEmoji() {
         try {
           await apiPost("emoji/remove", { id: cid, file });
           toast("已删除");
-          await renderEmoji();
+          await rerenderPage("emoji", renderEmoji);
         } catch (err) { toast(`删除失败：${err.message}`, "err"); }
       });
     });
@@ -3570,16 +3570,24 @@ async function renderEmoji() {
     input.addEventListener("change", async () => {
       const cid = input.id.replace("up-", "");
       const files = input.files || [];
+      let okCount = 0;
+      const errors = [];
       for (const file of files) {
         try {
           // AstrBot 桥禁止 endpoint 内联 query（files:upload 无 params 通道）：
           // 分类 id 放进文件名前缀 (<cid>__<原文件名>)，后端从中解析
           const tagged = new File([file], `${cid}__${file.name}`, { type: file.type || "application/octet-stream" });
-          await bridge.upload("emoji/upload", tagged);
-        } catch (err) { toast(`上传失败：${err.message}`, "err"); }
+          const res = await bridge.upload("emoji/upload", tagged);
+          // 0.193：桥可能返回「结构化失败」而不抛异常——必须检查，否则失败也提示「已上传」
+          const failed = res && (res.ok === false || res.success === false || res.error);
+          if (failed) errors.push(`${file.name}: ${(res && (res.error || res.message)) || "上传被拒绝"}`);
+          else okCount += 1;
+        } catch (err) { errors.push(`${file.name}: ${err.message}`); }
       }
-      toast("已上传");
-      await renderEmoji();
+      if (okCount) toast(`已上传 ${okCount} 张`);
+      if (errors.length) toast(`上传失败 ${errors.length} 张 —— ${errors[0]}`, "err");
+      input.value = "";
+      await rerenderPage("emoji", renderEmoji);
     });
   });
   await bindMasterSwitch("emoji-enabled", "emoji", "enabled");
@@ -3771,6 +3779,62 @@ async function saveConfigValue(module, key, value) {
   }
 }
 
+/* 滚动位置快照/恢复：设置保存后本页会重渲染，避免视口被强制拉回顶部 */
+function _scrollSnapshot() {
+  const nodes = [
+    document.scrollingElement, document.documentElement, document.body,
+    document.getElementById("view"), document.getElementById("app"),
+    document.querySelector(".page"), document.querySelector(".content"), document.querySelector(".main"),
+  ];
+  const seen = new Set();
+  const tops = [];
+  for (const n of nodes) {
+    if (!n || seen.has(n)) continue;
+    seen.add(n);
+    try { if (n.scrollTop) tops.push([n, n.scrollTop]); } catch (e) { /* ignore */ }
+  }
+  return { tops, winY: window.scrollY || 0 };
+}
+
+function _scrollRestore(snap) {
+  if (!snap) return;
+  const apply = () => {
+    for (const pair of snap.tops) {
+      try { pair[0].scrollTop = pair[1]; } catch (e) { /* ignore */ }
+    }
+    if (snap.winY) { try { window.scrollTo(0, snap.winY); } catch (e) { /* ignore */ } }
+  };
+  apply();
+  requestAnimationFrame(() => { apply(); requestAnimationFrame(apply); });
+}
+
+/* 同页重渲染：保留滚动位置（保存/应用/生成后不把视口拉回顶部；切换选项卡不受影响） */
+async function rerenderPage(pageKey, fn) {
+  const samePage = state.current === pageKey;
+  const snap = samePage ? _scrollSnapshot() : null;
+  try {
+    await fn();
+  } finally {
+    if (snap) _scrollRestore(snap);
+  }
+}
+
+/* 图片大图预览（点击缩略图弹出；点任意处或 Esc 关闭） */
+function openImagePreview(dataUrl) {
+  if (!dataUrl) return;
+  const mask = document.createElement("div");
+  mask.style.cssText = "position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;cursor:zoom-out;padding:24px";
+  const img = document.createElement("img");
+  img.src = dataUrl;
+  img.style.cssText = "max-width:100%;max-height:100%;border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.5)";
+  mask.appendChild(img);
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  const close = () => { mask.remove(); document.removeEventListener("keydown", onKey); };
+  mask.addEventListener("click", close);
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(mask);
+}
+
 /* 设置保存后重渲染当前模块页（主动/内心/日程/穿搭等依赖配置的页面） */
 function refreshCurrentView() {
   if (!state.current) return;
@@ -3791,7 +3855,10 @@ function refreshCurrentView() {
   };
   const fn = map[state.current];
   if (fn && state.current !== "settings") {
-    fn().catch((err) => diagLog(`${state.current} 页刷新异常: ${err.message}`));
+    const snap = _scrollSnapshot();
+    Promise.resolve(fn())
+      .catch((err) => diagLog(`${state.current} 页刷新异常: ${err.message}`))
+      .finally(() => _scrollRestore(snap));
   }
 }
 
@@ -4304,12 +4371,15 @@ async function renderImage() {
           <div id="img-test-result" class="hint" style="margin-top:8px">（未生成）</div>
         </section>
         <section class="panel" style="margin-top:16px">
-          <div class="panel-head"><h3 class="panel-title">最近生成</h3><span class="hint">${records.length} 条</span></div>
+          <div class="panel-head"><h3 class="panel-title">最近生成</h3><span class="hint">${records.length} 条${records.some((r) => r.thumb) ? " · 点击缩略图看大图" : ""}</span></div>
           ${records.map((r) => `
-            <div class="field">
-              <div class="hint" style="color:var(--ink)">${esc(String(r.time || ""))} · ${r.ok ? "✅" : "❌"} ${esc(String(r.kind || ""))}</div>
-              <div class="hint" style="opacity:.7">${esc(String(r.prompt || ""))}${r.note ? " — " + esc(String(r.note)) : ""}</div>
-              <div class="hint" style="opacity:.55">${Number(r.elapsed_ms || 0)}ms</div>
+            <div class="field" style="display:flex;gap:12px;align-items:flex-start">
+              ${r.thumb ? `<img class="img-thumb" src="${esc(r.thumb)}" data-full="${esc(r.full || r.thumb)}" title="点击查看大图" style="width:84px;height:84px;flex-shrink:0;object-fit:cover;border-radius:8px;border:1px solid var(--line);cursor:zoom-in;background:rgba(0,0,0,.04)" />` : `<div style="width:84px;height:84px;flex-shrink:0;border-radius:8px;border:1px dashed var(--line);display:flex;align-items:center;justify-content:center;font-size:11px;opacity:.5">无预览</div>`}
+              <div style="min-width:0;flex:1">
+                <div class="hint" style="color:var(--ink)">${esc(String(r.time || ""))} · ${r.ok ? "✅" : "❌"} ${esc(String(r.kind || ""))}</div>
+                <div class="hint" style="opacity:.7">${esc(String(r.prompt || ""))}${r.note ? " — " + esc(String(r.note)) : ""}</div>
+                <div class="hint" style="opacity:.55">${Number(r.elapsed_ms || 0)}ms${r.name ? " · " + esc(String(r.name)) : ""}</div>
+              </div>
             </div>`).join("") || '<div class="hint">还没有生成记录。</div>'}
         </section>
         <section class="panel" style="margin-top:16px">
@@ -4347,6 +4417,10 @@ async function renderImage() {
     </div>
   `;
   bindSettingsIn(view);
+  // 0.193：最近生成的缩略图 → 点击看大图
+  view.querySelectorAll("img.img-thumb").forEach((node) => {
+    node.addEventListener("click", () => openImagePreview(node.dataset.full || node.src));
+  });
   await bindMasterSwitch("img-judge", "image", "judge_enabled");
   const runBtn = document.getElementById("img-test-run");
   if (runBtn) runBtn.addEventListener("click", async () => {

@@ -194,7 +194,7 @@ class StorytellerPlugin(Star):
         from .inspiration import InspirationEngine
 
         self._inspiration_engine = InspirationEngine(self)
-        self.relationship_store = RelationshipStore(self.data_dir)
+        self.relationship_store = RelationshipStore(self.data_dir, self.config)
         self.mind_store = MindStore(self.data_dir)
         self.diary_store = DiaryStore(self.data_dir)
         self.persona_store = PersonaStore(self.data_dir)
@@ -2106,6 +2106,15 @@ class StorytellerPlugin(Star):
                         content = polished
                 except Exception:
                     pass
+            # 0.193：表情包判定（接管直连绕过主链判定，此前永远没有占位符 → 表情包从不发送）
+            if content:
+                try:
+                    pipeline = getattr(self, "reply_pipeline", None)
+                    picker = getattr(pipeline, "apply_emoji_pick", None)
+                    if callable(picker):
+                        content = await picker(event, content)
+                except Exception as exc:
+                    logger.warning("[Storyteller] 接管表情包判定异常（跳过）: %s", exc)
             sent_ok = False
             if content:
                 try:

@@ -16,6 +16,14 @@ from typing import Any
 
 _REL_FILE = "relationships.json"
 
+# 0.193：久未互动的自然降温（可在「关系」页配置）
+REL_DECAY_DEFAULTS = {
+    "enabled": True,
+    "free_days": 3.0,   # 3 天内不降温（日常忙碌不惩罚）
+    "per_day": 0.01,    # 超过免降温期后，每天回落多少好感度
+    "min": 0.15,        # 降温下限（不会低于这个值，保留基本温度）
+}
+
 STAGES = [
     (0.0, "陌生"),
     (0.25, "普通"),
@@ -60,10 +68,11 @@ def interaction_tier(affection: float, energy: str) -> str:
 
 
 class RelationshipStore:
-    """关系档案的读写与演进。"""
+    """关系档案的读写与演进（含 0.193 久未互动自然降温）。"""
 
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, config: Any = None):
         self._file = Path(data_dir) / _REL_FILE
+        self._config = config
         self._data: dict[str, dict[str, Any]] = self._load()
 
     def _load(self) -> dict[str, dict[str, Any]]:
@@ -90,7 +99,79 @@ class RelationshipStore:
         rel = self._data.get(user_id)
         if not isinstance(rel, dict):
             rel = default_relationship(user_id)
+            return rel
+        # 0.193：读取即结算久未互动的自然降温（变化才落盘）
+        if self._settle(rel):
+            self._data[user_id] = rel
+            self._save()
         return rel
+
+    # ---------------------------------------------------------- 自然降温（0.193）
+
+    def _decay_policy(self) -> dict[str, Any]:
+        """读降温策略（配置热更新；无配置时用默认值）。"""
+        cfg = self._config
+        if cfg is None:
+            return dict(REL_DECAY_DEFAULTS)
+        try:
+            return {
+                "enabled": bool(cfg.bool("relationship.decay_enabled", True)),
+                "free_days": max(0.0, float(cfg.int("relationship.decay_free_days", 3) or 0)),
+                "per_day": max(0.0, float(cfg.float("relationship.decay_per_day", 0.01))),
+                "min": max(0.0, min(1.0, float(cfg.float("relationship.decay_min", 0.15)))),
+            }
+        except Exception:
+            return dict(REL_DECAY_DEFAULTS)
+
+    @staticmethod
+    def _parse_ts(value: Any) -> float:
+        try:
+            return time.mktime(time.strptime(str(value or "")[:19], "%Y-%m-%d %H:%M:%S"))
+        except Exception:
+            return 0.0
+
+    def _settle(self, rel: dict[str, Any], *, force: bool = False) -> bool:
+        """按「上次接触」结算自然降温，返回好感度是否变化。
+
+        锚点 = 上次接触时的好感度（affection_anchor / affection_anchor_at）：
+        免降温期内不回落；超过后按 overdue 天数 × 每天幅度回落，且有下限。
+        节流：同一档案 1 小时内不重复结算（force=True 绕过，互动时用）。
+        """
+        policy = self._decay_policy()
+        if not policy["enabled"]:
+            return False
+        now = time.time()
+        last_settle = self._parse_ts(rel.get("decay_settled_at", ""))
+        if not force and last_settle and now - last_settle < 3600:
+            return False
+        anchor_at = (
+            self._parse_ts(rel.get("affection_anchor_at", ""))
+            or self._parse_ts(rel.get("last_seen", ""))
+            or self._parse_ts(rel.get("updated_at", ""))
+            or now
+        )
+        anchor_raw = rel.get("affection_anchor")
+        try:
+            anchor_val = float(anchor_raw) if anchor_raw is not None else float(rel.get("affection", 0.15))
+        except Exception:
+            anchor_val = float(rel.get("affection", 0.15))
+        days = max(0.0, (now - anchor_at) / 86400.0)
+        overdue = days - float(policy["free_days"])
+        target = anchor_val if overdue <= 0 else max(float(policy["min"]), anchor_val - overdue * float(policy["per_day"]))
+        try:
+            current = float(rel.get("affection", 0.15))
+        except Exception:
+            current = 0.15
+        changed = False
+        if target < current - 1e-6:
+            rel["affection"] = max(0.0, min(1.0, target))
+            changed = True
+        # 锚点保持（未接触就不动基准），补记结算时间
+        rel["affection_anchor"] = anchor_val
+        if not rel.get("affection_anchor_at"):
+            rel["affection_anchor_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(anchor_at))
+        rel["decay_settled_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+        return changed
 
     def touch(
         self,
@@ -99,10 +180,11 @@ class RelationshipStore:
         delta: float = 0.0,
         address: str = "",
     ) -> dict[str, Any]:
-        """记录一次互动并微调好感度（带阻尼）。"""
+        """记录一次互动并微调好感度（带阻尼；接触即刷新降温锚点）。"""
         if not user_id:
             return default_relationship(user_id)
         rel = self.get(user_id)
+        self._settle(rel, force=True)  # 互动前先结算此前的自然降温
         now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         if not rel.get("first_seen"):
             rel["first_seen"] = now
@@ -120,6 +202,10 @@ class RelationshipStore:
             if delta < 0 and current <= 0.3:
                 damped = delta * 0.5
             rel["affection"] = max(0.0, min(1.0, current + damped))
+        # 接触即重置降温基准：从现在的好感度与现在的时间重新起算
+        rel["affection_anchor"] = float(rel.get("affection", 0.15))
+        rel["affection_anchor_at"] = now
+        rel["decay_settled_at"] = now
         self._data[user_id] = rel
         self._save()
         return rel
@@ -157,6 +243,10 @@ class RelationshipStore:
         if address is not None:
             rel["address"] = str(address).strip()[:40]
         rel["updated_at"] = now
+        # 手动调整即视为一次接触：重置降温基准（否则刚调高就被算作逾期回落）
+        rel["affection_anchor"] = float(rel.get("affection", 0.15))
+        rel["affection_anchor_at"] = now
+        rel["decay_settled_at"] = now
         self._data[user_id] = rel
         self._save()
         return rel
@@ -165,16 +255,23 @@ class RelationshipStore:
         return self.touch(user_id, address=address)
 
     def list_all(self) -> list[dict[str, Any]]:
-        """返回所有关系档案（按好感度排序，附阶段与互动档位）。"""
+        """返回所有关系档案（按好感度排序，附阶段、互动档位与「多久没聊」）。"""
         result = []
+        changed = False
         for rel in self._data.values():
             if not isinstance(rel, dict):
                 continue
+            if self._settle(rel):
+                changed = True
             affection = float(rel.get("affection", 0.15))
             item = dict(rel)
             item["stage"] = stage_for(affection)
             item["tier"] = interaction_tier(affection, "")
+            last = self._parse_ts(rel.get("last_seen", "")) or self._parse_ts(rel.get("updated_at", ""))
+            item["idle_days"] = round(max(0.0, (time.time() - last) / 86400.0), 1) if last else None
             result.append(item)
+        if changed:
+            self._save()
         result.sort(key=lambda x: -float(x.get("affection", 0)))
         return result
 
