@@ -227,7 +227,8 @@ class MindStore:
 
         self._json = _json
         self._file = _Path(data_dir) / "mind.json"
-        self._data: dict[str, Any] = {"dreams": [], "thoughts": [], "sightings": [], "_meta": {}}
+        # 0.204：inner = 思绪留档（每轮"没说出口的内心"，元素为 dict：时间/会话/用户话/可见回复/内心/心情）
+        self._data: dict[str, Any] = {"dreams": [], "thoughts": [], "sightings": [], "inner": [], "_meta": {}}
         self._load()
 
     def _load(self) -> None:
@@ -235,7 +236,7 @@ class MindStore:
             if self._file.exists():
                 raw = self._json.loads(self._file.read_text(encoding="utf-8-sig"))
                 if isinstance(raw, dict):
-                    for key in ("dreams", "thoughts", "sightings"):
+                    for key in ("dreams", "thoughts", "sightings", "inner"):
                         if isinstance(raw.get(key), list):
                             self._data[key] = raw[key]
                     if isinstance(raw.get("_meta"), dict):
@@ -274,10 +275,66 @@ class MindStore:
     def add_sighting(self, text: str) -> None:
         self._push("sightings", text)
 
+    # ---------------------------------------------------------------- 0.204 思绪留档
+    def add_inner(self, entry: dict[str, Any], limit: int = 30) -> dict[str, Any] | None:
+        """写入一条思绪留档（最新在前）。返回落库后的条目（带 id/时间）。"""
+        try:
+            text = str((entry or {}).get("inner") or "").strip()
+            if not text:
+                return None
+            import time as _time
+
+            seq = int(self.meta_get("inner_seq", 0) or 0) + 1
+            self.meta_set("inner_seq", seq)
+            item = {
+                "id": f"i{seq}",
+                "at": _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime()),
+                "session": str((entry or {}).get("session") or "")[:200],
+                "user": str((entry or {}).get("user") or "")[:300],
+                "visible": str((entry or {}).get("visible") or "")[:600],
+                "inner": text[:600],
+                "mood": str((entry or {}).get("mood") or "")[:40],
+            }
+            items = self._data.setdefault("inner", [])
+            items.insert(0, item)
+            keep = max(1, int(limit or 30))
+            if len(items) > keep:
+                del items[keep:]
+            self._save()
+            return item
+        except Exception:
+            return None
+
+    def inner_items(self, *, limit: int = 0, session: str = "") -> list[dict[str, Any]]:
+        """读取思绪留档（最新在前）；可按会话过滤，limit=0 表示不限。"""
+        try:
+            items = [x for x in (self._data.get("inner") or []) if isinstance(x, dict)]
+            if session:
+                items = [x for x in items if str(x.get("session") or "") == str(session)]
+            if limit and limit > 0:
+                items = items[:limit]
+            return items
+        except Exception:
+            return []
+
+    def prune_inner(self, keep: int) -> int:
+        """按配置裁剪思绪留档，返回删除条数。"""
+        try:
+            items = self._data.setdefault("inner", [])
+            keep = max(1, int(keep or 30))
+            if len(items) <= keep:
+                return 0
+            removed = len(items) - keep
+            del items[keep:]
+            self._save()
+            return removed
+        except Exception:
+            return 0
+
     def delete(self, kind: str, index: int) -> bool:
         """删除某类第 index 条（0 为最新）。越界或类型非法返回 False。"""
         try:
-            if kind not in ("dreams", "thoughts", "sightings"):
+            if kind not in ("dreams", "thoughts", "sightings", "inner"):
                 return False
             i = int(index)
             items = self._data.get(kind, [])
@@ -294,6 +351,7 @@ class MindStore:
             "dreams": self._data.get("dreams", []),
             "thoughts": self._data.get("thoughts", []),
             "sightings": self._data.get("sightings", []),
+            "inner": self._data.get("inner", []),
         }
 
     def meta_get(self, key: str, default: Any = None) -> Any:

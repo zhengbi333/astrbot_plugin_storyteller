@@ -27,6 +27,7 @@ from .emoji import EmojiStore
 from .image_gen import ImageGen, detect_image_intent
 from .intercept import InterceptBuffer, SentRequestBuffer, utc_now
 from .capabilities import build_declaration, build_tool_schemas, cap_name_from_tool, caps_done, dispatch as cap_dispatch, format_results as cap_format, mark_cap_done, parse_marks, strip_marks
+from . import mindstream as mindstream_mod
 from .log import logger, setup as setup_logging
 from .memory import (
     build_commitment_prompt,
@@ -221,6 +222,7 @@ class StorytellerPlugin(Star):
         self._cap_shared: dict[str, float] = {}    # 0.197：能力分享冷却（分享内心：同一条不重复念叨）
         self._native_tools_unsupported = False     # 0.200：提供方拒绝原生工具时置位 → 自动恢复正则兜底
         self._cap_log: list[dict] = []             # 0.201：能力调用日志（面板「能力清单」观测用）
+        self._inner_injected: dict[str, set] = {}  # 0.204：思绪已回注的 id（同一条不反复回注）
         try:
             self._migrate_intercept_template()
         except Exception:
@@ -2086,6 +2088,26 @@ class StorytellerPlugin(Star):
                     final_system += "\n\n" + _cap_decl
             except Exception as exc:
                 logger.warning("[Storyteller] 能力声明生成失败（跳过）: %s", exc)
+            # 0.204 思绪（内心持久化）：① 让它这轮藏起半句没说出口的思绪；② 把上一轮的思绪交给它接着想
+            _inner_picked: list[dict] = []
+            try:
+                if mindstream_mod.enabled(self):
+                    _instr = mindstream_mod.build_instruction(self)
+                    if _instr:
+                        final_system += _instr
+                    _cnt = mindstream_mod.inject_count(self)
+                    if _cnt > 0:
+                        _used = self._inner_injected.get(session_id) or set()
+                        _inner_picked = mindstream_mod.pick_for_injection(
+                            self.mind_store.inner_items(limit=20),
+                            session=session_id, count=_cnt, already=_used,
+                        )
+                        _inj = mindstream_mod.render_injection(self, _inner_picked)
+                        if _inj:
+                            final_system += "\n\n" + _inj
+            except Exception as exc:
+                logger.warning("[Storyteller] 思绪注入失败（跳过）: %s", exc)
+                _inner_picked = []
             # 0.162 对话语义标签已改为 0.164 的 _labelize_anchors（模板内直接带标签，不再追加【本次对话】段
             # 避免"裸文本+带标签补丁"并存的重复混乱）
             # 0.165 格式工整：注入后压缩连续空行（{记忆}/{天气}/{见闻} 空时模板会留出多个空行连排）
@@ -2133,6 +2155,7 @@ class StorytellerPlugin(Star):
             # 0.197：能力执行轮次（模型请求能力 → 执行 → 结果回灌再生成），与打断合并共用同一循环
             cap_round = 0
             cap_max_rounds = max(0, min(4, self.config.int("capabilities.max_rounds", 1)))
+            _last_inner = ""  # 0.204：本轮最后一段"没说出口的思绪"（能力/打断重生成时取最新一次）
             while True:
                 try:
                     from astrbot.api.event import MessageChain
@@ -2159,6 +2182,13 @@ class StorytellerPlugin(Star):
                     return
                 self._record_usage(resp, "takeover", provider_id or "default")
                 content = str(getattr(resp, "completion_text", "") or "").strip()
+                # 0.204 思绪：**生成后立刻**把隐藏块摘出来——藏起来的内容绝不进能力解析/判定/润色/表情包链路
+                try:
+                    content, _inner_round = mindstream_mod.split_inner(self, content)
+                    if _inner_round:
+                        _last_inner = _inner_round
+                except Exception as exc:
+                    logger.warning("[Storyteller] 思绪剥离失败（按原文继续）: %s", exc)
                 try:
                     logger.info("[Storyteller] 接管生成内容: len=%d %s", len(content), content[:120].replace("\n", " "))  # 排查日志(临时)
                 except Exception:
@@ -2279,6 +2309,45 @@ class StorytellerPlugin(Star):
                         content = polished
                 except Exception:
                     pass
+            # 0.204 思绪留档：把这轮藏起来的半句记进留档（下一轮接着想 / 面板「思绪」可查可删）。
+            # 放在判定之前：即使这轮判定沉默（没说出口），它的思绪也照样留下来——那正是"心里想过的"。
+            try:
+                if _last_inner and mindstream_mod.enabled(self):
+                    _mood = ""
+                    try:
+                        _mood = str(self.presence_store.load(with_decay=False).get("mood") or "")[:20]
+                    except Exception:
+                        pass
+                    _item = self.mind_store.add_inner(
+                        {
+                            "session": session_id,
+                            "user": str(getattr(event, "message_str", "") or ""),
+                            "visible": content,
+                            "inner": _last_inner,
+                            "mood": _mood,
+                        },
+                        limit=mindstream_mod.keep_limit(self),
+                    )
+                    logger.info(
+                        "[Storyteller] 思绪留档: %s（%s 字）%s",
+                        (_item or {}).get("id", "?"), len(_last_inner), _last_inner[:40].replace("\n", " "),
+                    )
+                    # 留档按配置裁剪（降低 keep 时立即生效）
+                    try:
+                        self.mind_store.prune_inner(mindstream_mod.keep_limit(self))
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.warning("[Storyteller] 思绪留档失败（不影响回复）: %s", exc)
+            # 0.204 记账：**只要这轮回注过就记账**（与"这轮有没有写思绪"无关，否则去重会失效）
+            try:
+                if _inner_picked:
+                    _used = self._inner_injected.setdefault(session_id, set())
+                    if len(_used) > 60:
+                        _used.clear()
+                    _used.update(str(x.get("id") or "") for x in _inner_picked if x.get("id"))
+            except Exception as exc:
+                logger.warning("[Storyteller] 思绪回注记账失败: %s", exc)
             # 0.195：回复判定（沉默/草草回复）——接管直连此前绕过判定，导致「每条消息都必回」；
             # 这里补上：判定模型认为此刻不该接话（敷衍收尾/话题自然结束/重复道别）时就不发。
             # 保险：连续沉默不超过 silence_streak_limit 次（防止误判导致一直不理人）。
@@ -2329,6 +2398,14 @@ class StorytellerPlugin(Star):
             if content:
                 try:
                     content = strip_marks(content)
+                except Exception:
+                    pass
+            # 0.204 保险：发送前再摘一次思绪隐藏块（任何分支都不该把藏起来的那半句发出去）
+            if content:
+                try:
+                    content, _leak = mindstream_mod.split_inner(self, content)
+                    if _leak:
+                        logger.warning("[Storyteller] 发送前又摘到一段思绪（已拦下，未外发）: %s 字", len(_leak))
                 except Exception:
                     pass
             sent_ok = False

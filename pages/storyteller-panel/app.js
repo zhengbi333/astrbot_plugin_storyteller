@@ -18,6 +18,7 @@ const NAV = [
   { key: "presence", label: "状态" },
   { key: "schedule", label: "日程" },
   { key: "wardrobe", label: "穿搭" },
+  { key: "mindstream", label: "思绪" },
   { key: "mind", label: "内心" },
   { key: "memory", label: "记忆" },
   { key: "proactive", label: "主动" },
@@ -44,6 +45,7 @@ const TITLES = {
   presence: ["状态锚", "此刻的心情与精力"],
   schedule: ["日程锚", "每日日程"],
   wardrobe: ["穿搭与衣柜", "当前穿搭与衣物库"],
+  mindstream: ["思绪", "没说出口的那半句：留档、回注与开关"],
   mind: ["内心世界", "梦境、思考与见闻"],
   memory: ["记忆", "你的长期记忆（约定/愿望/时间线）"],
   proactive: ["主动对话", "智能主动触达"],
@@ -691,6 +693,7 @@ async function render() {
     if (state.current === "presence") renderPresence().catch((err) => diagLog(`状态页异常: ${err.message}`));
     if (state.current === "schedule") renderSchedule().catch((err) => diagLog(`日程页异常: ${err.message}`));
     if (state.current === "wardrobe") renderWardrobe().catch((err) => diagLog(`穿搭页异常: ${err.message}`));
+    if (state.current === "mindstream") renderMindstream().catch((err) => diagLog(`思绪页异常: ${err.message}`));
     if (state.current === "mind") renderMind().catch((err) => diagLog(`内心页异常: ${err.message}`));
     if (state.current === "memory") renderMemory().catch((err) => diagLog(`记忆页异常: ${err.message}`));
     if (state.current === "proactive") renderProactive().catch((err) => diagLog(`主动页异常: ${err.message}`));
@@ -2367,6 +2370,142 @@ async function renderWardrobe() {
 }
 
 /* 内心页：梦境 / 思考 / 见闻 */
+/* 思绪页（0.204）：没说出口的那半句——留档流 + 回注设置 + 主开关 */
+async function renderMindstream() {
+  const view = $("#view");
+  view.innerHTML = `<div class="loading">加载思绪…</div>`;
+  let data;
+  try {
+    data = await apiGet("mindstream");
+  } catch (err) {
+    if (state.current === "mindstream") {
+      view.innerHTML = `<div class="section"><p class="section-desc">加载失败：${err.message}</p></div>`;
+    }
+    return;
+  }
+  if (state.current !== "mindstream") return;
+  const cfgSchema = (state.configSchema && state.configSchema.mindstream) || {};
+  const cfgItems = cfgSchema.items || {};
+  const cfgValues = ((state.configValues || {}).mindstream) || {};
+  const ms = {
+    data,
+    page: 0,
+    pageSize: 6,
+  };
+  const refresh = async () => {
+    ms.data = await apiGet("mindstream");
+    renderPage();
+  };
+  const renderList = () => {
+    const box = document.getElementById("ms-list");
+    if (!box) return;
+    const items = (ms.data && ms.data.items) || [];
+    if (!items.length) {
+      box.innerHTML = `<div class="hint" style="padding:14px 0">还没有留档——开启后用正常聊天说几句，它心里想的那些就会出现在这里。</div>`;
+      return;
+    }
+    const pages = Math.max(1, Math.ceil(items.length / ms.pageSize));
+    if (ms.page >= pages) ms.page = pages - 1;
+    const start = ms.page * ms.pageSize;
+    const slice = items.slice(start, start + ms.pageSize);
+    box.innerHTML = slice.map((it, i) => {
+      const idx = start + i;
+      const mood = it.mood ? `<span class="hint" style="opacity:.55">· 心情 ${esc(it.mood)}</span>` : "";
+      const saidWhat = String(it.visible || "").trim();
+      const heardWhat = String(it.user || "").trim();
+      return `
+        <div class="field" style="border-left:3px solid var(--glow-a);padding-left:10px;margin-bottom:10px">
+          <div class="field-row" style="align-items:baseline;gap:8px">
+            <span class="hint" style="opacity:.6">${esc(clip(it.at || "", 16))}</span>
+            ${mood}
+            <button class="btn ghost-danger" data-ms-del="${idx}" style="margin-left:auto;padding:2px 8px;font-size:12px">删除</button>
+          </div>
+          <div style="margin:6px 0 4px;color:var(--ink)">${esc(String(it.inner || ""))}</div>
+          ${saidWhat ? `<div class="hint" style="opacity:.6">说出口的是：${esc(clip(saidWhat, 60))}</div>` : ""}
+          ${heardWhat ? `<div class="hint" style="opacity:.45">那时对方说：${esc(clip(heardWhat, 50))}</div>` : ""}
+        </div>`;
+    }).join("");
+    const pager = document.getElementById("ms-pager");
+    if (pager) {
+      pager.innerHTML = pages > 1 ? `
+        <div class="field-row" style="gap:6px;justify-content:space-between;margin-top:6px">
+          <span class="hint" style="color:var(--ink)">第 ${ms.page + 1}/${pages} 页 · 共 ${items.length} 条</span>
+          <div style="display:flex;gap:6px">
+            <button class="btn" data-ms-page="${ms.page - 1}" ${ms.page === 0 ? "disabled" : ""}>‹ 上一页</button>
+            <button class="btn" data-ms-page="${ms.page + 1}" ${ms.page >= pages - 1 ? "disabled" : ""}>下一页 ›</button>
+          </div>
+        </div>` : `<div class="hint" style="margin-top:6px;opacity:.55">共 ${items.length} 条</div>`;
+      pager.querySelectorAll("[data-ms-page]").forEach((node) => {
+        node.addEventListener("click", () => {
+          ms.page = Number(node.dataset.msPage) || 0;
+          renderList();
+        });
+      });
+    }
+    box.querySelectorAll("[data-ms-del]").forEach((node) => {
+      node.addEventListener("click", async () => {
+        try {
+          await apiPost("mindstream/delete", { index: Number(node.dataset.msDel) });
+          toast("已删除");
+          await refresh();
+        } catch (err) {
+          toast(`删除失败：${err.message}`, "err");
+        }
+      });
+    });
+  };
+  const renderPage = () => {
+    const d = ms.data || {};
+    const st = d.stats || {};
+    const field = (key, fallback) => renderSettingField("mindstream", key, cfgItems[key] || fallback, cfgValues[key]);
+    view.innerHTML = `
+      ${placeholderHintCard("mindstream")}
+      <div class="rel-layout" style="align-items:flex-start">
+        <div class="rel-left" style="flex:0 0 300px">
+          <section class="panel">
+            <div class="panel-head"><div><h3 class="panel-title">思绪</h3><span class="hint">没说出口的那半句</span></div></div>
+            ${masterSwitch(
+              "mindstream-enabled",
+              "思绪总开关",
+              (cfgItems.enabled && cfgItems.enabled.hint) || "开启后每轮回复末尾会附带一段藏起来的思绪，插件摘出来留档、下一轮再交给它接着想；关闭则完全不产生也不回注。",
+              Boolean(d.enabled),
+            )}
+            <div class="settings-grid compact-grid" style="grid-template-columns:1fr 1fr;margin-top:10px">
+              <div class="field"><div class="field-title">留档总数</div><div class="hint" style="color:var(--ink)">${Number(st.total || 0)} 条</div></div>
+              <div class="field"><div class="field-title">今日新增</div><div class="hint" style="color:var(--ink)">${Number(st.today || 0)} 条</div></div>
+              <div class="field"><div class="field-title">回注条数</div><div class="hint" style="color:var(--ink)">${Number(d.inject_count || 0)} 条/轮</div></div>
+              <div class="field"><div class="field-title">留档上限</div><div class="hint" style="color:var(--ink)">${Number(d.keep || 0)} 条</div></div>
+            </div>
+            <p class="hint" style="margin-top:8px">藏起来的内容不会发给对方，也不进润色与表情包链路；它只属于它自己。</p>
+          </section>
+        </div>
+        <div class="rel-center" style="flex:1;min-width:0">
+          <section class="panel">
+            <div class="panel-head">
+              <div><h3 class="panel-title">思绪留档</h3><span class="hint">最新在前 · 可删单条</span></div>
+              <button class="btn" id="ms-refresh">刷新</button>
+            </div>
+            <div id="ms-list" style="max-height:60vh;overflow-y:auto;padding-right:4px"></div>
+            <div id="ms-pager"></div>
+          </section>
+        </div>
+        <div class="rel-right" style="flex:0 0 320px">
+          <section class="panel">
+            <div class="panel-head"><div><h3 class="panel-title">设置</h3><span class="hint">留档与回注</span></div></div>
+            <div class="settings-grid compact-grid">${field("keep")}${field("inject_count")}${field("inject_max_chars")}${field("strip_unclosed")}</div>
+          </section>
+        </div>
+      </div>
+    `;
+    bindMasterSwitch("mindstream-enabled", "mindstream", "enabled");
+    bindSettingsIn(view);
+    const btn = $("#ms-refresh");
+    if (btn) btn.addEventListener("click", () => refresh().catch((err) => toast(`刷新失败：${err.message}`, "err")));
+    renderList();
+  };
+  renderPage();
+}
+
 async function renderMind() {
   const view = $("#view");
   view.innerHTML = `<div class="loading">加载内心世界…</div>`;
@@ -3632,7 +3771,8 @@ async function renderSettings() {
   // 设置页只保留「模型配置」（全局生成策略：流式/超时/思考/回退），其它全部模块化到各页
   // 0.196：troubleshoot 已有专属顶部选项卡「清障」，设置页不再重复展示它
   // 0.197：capabilities 通过 AstrBot 插件配置页/后续能力面板管理，暂不进设置页（避免又一次重复入口）
-  const EXCLUDED_MODULES = ["identity", "relationship", "voice", "persona", "presence", "schedule", "proactive", "emoji", "wardrobe", "debounce", "intercept", "rewrite", "memory", "vision", "pipeline", "general", "search", "mind", "send", "image", "troubleshoot", "capabilities"];
+  // 0.204：mindstream 有专属页「思绪」（主开关与设置都在那儿），设置页同样不重复
+  const EXCLUDED_MODULES = ["identity", "relationship", "voice", "persona", "presence", "schedule", "proactive", "emoji", "wardrobe", "debounce", "intercept", "rewrite", "memory", "vision", "pipeline", "general", "search", "mind", "send", "image", "troubleshoot", "capabilities", "mindstream"];
   const modules = Object.keys(schema).filter((m) => !EXCLUDED_MODULES.includes(m));
   if (!state.settingsModule || !modules.includes(state.settingsModule)) {
     state.settingsModule = modules[0] || "";
@@ -3857,6 +3997,7 @@ function refreshCurrentView() {
   if (!state.current) return;
   const map = {
     proactive: renderProactive,
+    mindstream: renderMindstream,
     mind: renderMind,
     schedule: renderSchedule,
     wardrobe: renderWardrobe,

@@ -1262,5 +1262,42 @@
         "hint": "每天最多翻几次最近的对话记录（0=不限）。"
       }
     }
+  },
+  "mindstream": {
+    "description": "思绪（内心持久化）",
+    "type": "object",
+    "hint": "让 Bot 拥有连续的内心线：每轮回复时它会藏起半句没说出口的思绪，插件把这段摘出来存进留档，下一轮再交给它作为继续想下去的起点。藏起来的内容绝不会发给对方，也不参与润色与表情包。",
+    "items": {
+      "enabled": {
+        "description": "思绪总开关",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后每轮藏起半句思绪并留档、回注下一轮；关闭则完全不产生也不回注（已有留档保留）。"
+      },
+      "keep": {
+        "description": "留档条数",
+        "type": "int",
+        "default": 30,
+        "hint": "留档最多保留多少条（最新在前，超出丢弃最旧的），1-200。"
+      },
+      "inject_count": {
+        "description": "回注条数",
+        "type": "int",
+        "default": 1,
+        "hint": "下一轮交给它最近几条（0=只留档；建议先 1，最多 5）。"
+      },
+      "inject_max_chars": {
+        "description": "单条回注上限(字)",
+        "type": "int",
+        "default": 120,
+        "hint": "每条回注最多多少字（超出截断），20-500。"
+      },
+      "strip_unclosed": {
+        "description": "未闭合兜底",
+        "type": "bool",
+        "default": true,
+        "hint": "模型漏写结束标记时，把起始标记之后整段摘除（更安全）。"
+      }
+    }
   }
 }

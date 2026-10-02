@@ -232,6 +232,8 @@ class StorytellerWebApi:
             (f"{prefix}/mind/generate", self.mind_generate, ["POST"], "Storyteller mind manual generate"),
             (f"{prefix}/mind/search", self.mind_search, ["POST"], "Storyteller mind manual search"),
             (f"{prefix}/mind/delete", self.mind_delete, ["POST"], "Storyteller mind delete entry"),
+            (f"{prefix}/mindstream", self.mindstream_read, ["GET"], "Storyteller mindstream hidden notes read"),
+            (f"{prefix}/mindstream/delete", self.mindstream_delete, ["POST"], "Storyteller mindstream delete entry"),
             (f"{prefix}/diary", self.diary_read, ["GET"], "Storyteller diary read"),
             (f"{prefix}/diary/prompt_preview", self.diary_prompt_preview, ["GET"], "Storyteller diary prompt preview"),
             (f"{prefix}/wardrobe", self.wardrobe_read, ["GET"], "Storyteller wardrobe read"),
@@ -2182,6 +2184,48 @@ class StorytellerWebApi:
         if not ok:
             return await _fail("删除失败：记录不存在")
         return await _ok({"entries": self._plugin.mind_store.all()})
+
+    # ------------------------------------------------------------- 思绪（内心持久化）
+
+    async def mindstream_read(self) -> Any:
+        """思绪状态：开关 / 设置 / 统计 / 最近留档（面板「思绪」页用）。"""
+        try:
+            from . import mindstream as ms
+
+            store = getattr(self._plugin, "mind_store", None)
+            if store is None:
+                return await _fail("内心存储未初始化")
+            items = store.inner_items(limit=200)
+            today = time.strftime("%Y-%m-%d", time.localtime())
+            return await _ok({
+                "enabled": ms.enabled(self._plugin),
+                "keep": ms.keep_limit(self._plugin),
+                "inject_count": ms.inject_count(self._plugin),
+                "inject_max_chars": ms.inject_max_chars(self._plugin),
+                "strip_unclosed": ms.strip_unclosed_enabled(self._plugin),
+                "stats": {
+                    "total": len(items),
+                    "today": sum(1 for x in items if str(x.get("at") or "").startswith(today)),
+                },
+                "items": items[:100],
+            })
+        except Exception as exc:
+            return await _fail(f"思绪读取失败：{exc}")
+
+    async def mindstream_delete(self) -> Any:
+        """删除一条思绪留档（index 为"最新在前"的下标）。"""
+        body = await _json_body(default={})
+        try:
+            index = int((body or {}).get("index"))
+        except Exception:
+            return await _fail("删除失败：下标无效")
+        try:
+            ok = self._plugin.mind_store.delete("inner", index)
+        except Exception:
+            ok = False
+        if not ok:
+            return await _fail("删除失败：记录不存在")
+        return await _ok({"index": index})
 
     # ------------------------------------------------------------- 日记
 
