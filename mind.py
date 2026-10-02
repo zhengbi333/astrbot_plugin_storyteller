@@ -228,7 +228,8 @@ class MindStore:
         self._json = _json
         self._file = _Path(data_dir) / "mind.json"
         # 0.204：inner = 思绪留档（每轮"没说出口的内心"，元素为 dict：时间/会话/用户话/可见回复/内心/心情）
-        self._data: dict[str, Any] = {"dreams": [], "thoughts": [], "sightings": [], "inner": [], "_meta": {}}
+        # 0.205：todos = 待办（元素为 dict：时间/文本/完成状态/完成时间/会话/记忆 id）
+        self._data: dict[str, Any] = {"dreams": [], "thoughts": [], "sightings": [], "inner": [], "todos": [], "_meta": {}}
         self._load()
 
     def _load(self) -> None:
@@ -236,7 +237,7 @@ class MindStore:
             if self._file.exists():
                 raw = self._json.loads(self._file.read_text(encoding="utf-8-sig"))
                 if isinstance(raw, dict):
-                    for key in ("dreams", "thoughts", "sightings", "inner"):
+                    for key in ("dreams", "thoughts", "sightings", "inner", "todos"):
                         if isinstance(raw.get(key), list):
                             self._data[key] = raw[key]
                     if isinstance(raw.get("_meta"), dict):
@@ -331,10 +332,70 @@ class MindStore:
         except Exception:
             return 0
 
+    # ---------------------------------------------------------------- 0.205 待办
+    # 与「记住」的分工：内容照样写进长期记忆（type=todo，长期可检索）；
+    # 本地这份只补记忆库没有的信息——**完成状态**（可勾选），不另起一套语义。
+    def add_todo(self, *, text: str, session: str = "", memory_id: str = "") -> dict[str, Any] | None:
+        """登记一条待办（最新在前）。返回落库条目。"""
+        try:
+            body = str(text or "").strip()
+            if not body:
+                return None
+            import time as _time
+
+            seq = int(self.meta_get("todo_seq", 0) or 0) + 1
+            self.meta_set("todo_seq", seq)
+            item = {
+                "id": f"t{seq}",
+                "text": body[:300],
+                "done": False,
+                "at": _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime()),
+                "done_at": "",
+                "session": str(session or "")[:200],
+                "memory_id": str(memory_id or "")[:80],
+            }
+            items = self._data.setdefault("todos", [])
+            items.insert(0, item)
+            del items[200:]  # 含已完成在内最多留 200 条
+            self._save()
+            return item
+        except Exception:
+            return None
+
+    def list_todos(self, *, include_done: bool = False, limit: int = 20) -> list[dict[str, Any]]:
+        """列出待办（最新在前）。默认只看未完成。"""
+        try:
+            items = [x for x in (self._data.get("todos") or []) if isinstance(x, dict)]
+            if not include_done:
+                items = [x for x in items if not x.get("done")]
+            return items[: max(1, int(limit or 20))]
+        except Exception:
+            return []
+
+    def mark_todo_done(self, target: str) -> dict[str, Any] | None:
+        """按 id 或文本关键词把最近一条未完成待办标记为完成；找不到返回 None。"""
+        try:
+            key = str(target or "").strip()
+            if not key:
+                return None
+            import time as _time
+
+            for it in self._data.get("todos") or []:
+                if not isinstance(it, dict) or it.get("done"):
+                    continue
+                if str(it.get("id") or "") == key or key in str(it.get("text") or ""):
+                    it["done"] = True
+                    it["done_at"] = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime())
+                    self._save()
+                    return it
+            return None
+        except Exception:
+            return None
+
     def delete(self, kind: str, index: int) -> bool:
         """删除某类第 index 条（0 为最新）。越界或类型非法返回 False。"""
         try:
-            if kind not in ("dreams", "thoughts", "sightings", "inner"):
+            if kind not in ("dreams", "thoughts", "sightings", "inner", "todos"):
                 return False
             i = int(index)
             items = self._data.get(kind, [])
@@ -352,6 +413,7 @@ class MindStore:
             "thoughts": self._data.get("thoughts", []),
             "sightings": self._data.get("sightings", []),
             "inner": self._data.get("inner", []),
+            "todos": self._data.get("todos", []),
         }
 
     def meta_get(self, key: str, default: Any = None) -> Any:

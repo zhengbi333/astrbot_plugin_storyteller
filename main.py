@@ -3552,6 +3552,29 @@ class StorytellerPlugin(Star):
         """
         return await self._cap_tool(event, "history_lookup", kwargs)
 
+    @filter.llm_tool(name="story_inner_recall")
+    async def story_inner_recall_tool(self, event: AstrMessageEvent, **kwargs: Any) -> str:
+        """回想你自己当时的思绪（心里留下、没说出口的那半句）。
+
+        对方问「你当时在想什么」、或你想接上之前的心思时调用；找不到就如实说想不起来。
+
+        Args:
+            query(string): 可选，关键词。
+            count(number): 可选，条数，默认 3。
+        """
+        return await self._cap_tool(event, "inner_recall", kwargs)
+
+    @filter.llm_tool(name="story_manage_todo")
+    async def story_manage_todo_tool(self, event: AstrMessageEvent, **kwargs: Any) -> str:
+        """待办：加一条 / 标记完成 / 列出来（与「记住」不同——这些有完成状态）。
+
+        Args:
+            action(string): add（加一条）| done（标记完成）| list（列出来）。
+            text(string): add 用：要做的事；done 用：待办关键词。
+            include_done(boolean): list 可选，是否含已完成的。
+        """
+        return await self._cap_tool(event, "manage_todo", kwargs)
+
     @staticmethod
     def _safe_call(event: Any, name: str) -> str:
         func = getattr(event, name, None)

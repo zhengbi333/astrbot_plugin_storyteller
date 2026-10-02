@@ -442,6 +442,122 @@ async def _impl_history_lookup(plugin: Any, event: Any, payload: dict) -> dict[s
             "next_hint": "像人回忆那样自然提起（别整段复述记录）。"}
 
 
+async def _impl_inner_recall(plugin: Any, event: Any, payload: dict) -> dict[str, Any]:
+    """回想自己当时的思绪（内心留档里"没说出口的那半句"），可按关键词找。"""
+    query = str(payload.get("query") or "").strip()
+    try:
+        count = max(1, min(10, int(payload.get("count") or 3)))
+    except Exception:
+        count = 3
+    session = str(getattr(event, "unified_msg_origin", "") or "")
+    store = getattr(plugin, "mind_store", None)
+    if store is None:
+        return {"ok": False, "status": "unavailable", "message": "思绪留档未初始化"}
+    try:
+        items = list(store.inner_items(limit=60, session=session))
+        if not items:  # 本会话还没有 → 退回全体（"我最近都在想什么"也说得通）
+            items = list(store.inner_items(limit=60))
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": f"读取思绪失败：{exc}"}
+    if query:
+        kws = [k for k in re.split(r"[\s,，。、；;]+", query) if k]
+        if kws:
+            def _hit(it: dict) -> bool:
+                blob = f"{it.get('inner','')} {it.get('user','')} {it.get('visible','')}"
+                return any(k in blob for k in kws)
+            items = [it for it in items if _hit(it)]
+    if not items:
+        return {"ok": True, "status": "empty", "message": "没有相关的思绪留档",
+                "next_hint": "如实说一时想不起来当时在想什么（别编一个）。"}
+    picked = items[:count]
+    lines = []
+    for it in picked:
+        text = str(it.get("inner") or "").strip()
+        if text:
+            lines.append(f"- （{str(it.get('at') or '')[-5:]}）{text[:140]}")
+    if not lines:
+        return {"ok": True, "status": "empty", "message": "留档里没有可用的内容",
+                "next_hint": "如实说想不起来。"}
+    return {
+        "ok": True, "status": "ok", "items": lines, "detail": "\n".join(lines),
+        "next_hint": "用你自己的话自然接上当时的想法（别照搬原文、别解释这个机制）。",
+    }
+
+
+async def _impl_manage_todo(plugin: Any, event: Any, payload: dict) -> dict[str, Any]:
+    """待办：加一条 / 标记完成 / 列出来。
+
+    与「记住」的分工：**加待办走同一条长期记忆通道**（type=todo，长期可检索），
+    另外在本地留一条"可勾选"的记录（完成状态是记忆库没有的信息），不再另起一套语义。
+    """
+    action = str(payload.get("action") or "add").strip().lower()
+    store = getattr(plugin, "mind_store", None)
+    if store is None:
+        return {"ok": False, "status": "unavailable", "message": "待办存储未初始化"}
+    session = str(getattr(event, "unified_msg_origin", "") or "")
+
+    if action in ("list", "ls", "query"):
+        try:
+            items = store.list_todos(include_done=bool(payload.get("include_done")), limit=20)
+        except Exception as exc:
+            return {"ok": False, "status": "error", "message": f"读取待办失败：{exc}"}
+        if not items:
+            return {"ok": True, "status": "empty", "message": "没有待办",
+                    "next_hint": "如实说暂时没记着要做什么（别编）。"}
+        lines = []
+        for it in items:
+            mark = "√" if it.get("done") else "·"
+            lines.append(f"{mark} {str(it.get('text') or '')[:80]}")
+        return {"ok": True, "status": "ok", "items": lines, "detail": "\n".join(lines),
+                "next_hint": "自然说一句（别像念清单）。"}
+
+    if action in ("done", "finish", "complete"):
+        target = str(payload.get("text") or payload.get("target") or "").strip()
+        if not target:
+            return {"ok": False, "status": "error", "message": "要标记哪一条？给 text 关键词"}
+        try:
+            hit = store.mark_todo_done(target)
+        except Exception as exc:
+            return {"ok": False, "status": "error", "message": f"标记失败：{exc}"}
+        if not hit:
+            return {"ok": True, "status": "empty", "message": "没找到对应的未完成待办",
+                    "next_hint": "如实说没找到这条（别硬说做完了）。"}
+        return {"ok": True, "status": "ok", "done": str(hit.get("text") or ""),
+                "next_hint": "可以自然确认一句「那件事算完了」之类。"}
+
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return {"ok": False, "status": "error", "message": "text 不能为空"}
+    memory_id = ""
+    memory_note = ""
+    bridge = plugin._get_memory_bridge()
+    if bridge is not None:
+        try:
+            from .memory import build_session_context
+
+            memory_id = await bridge.add_memory(
+                content=text, memory_type="note",
+                session_context=build_session_context(event),
+                importance=0.6, source_plugin="astrbot_plugin_storyteller",
+            ) or ""
+            if not memory_id:
+                memory_note = "（这次没能写进长期记忆，只记在了待办里）"
+        except Exception as exc:
+            # 写不进长期记忆也要留本地待办，但要如实说明（别谎称"都记好了"）
+            memory_note = f"（写长期记忆失败：{str(exc)[:40]}；只记在了待办里）"
+    try:
+        item = store.add_todo(text=text, session=session, memory_id=memory_id)
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": f"记待办失败：{exc}"}
+    if item is None:
+        return {"ok": False, "status": "error", "message": "记待办失败",
+                "next_hint": "如实说没记上。"}
+    return {
+        "ok": True, "status": "ok", "text": text, "memory_id": memory_id,
+        "next_hint": "自然应一声就好（别把待办念一遍）；以后对方说做完了，用 done 勾掉。" + memory_note,
+    }
+
+
 # ---------------------------------------------------------------- 注册表
 
 CAPABILITIES: dict[str, Capability] = {}
@@ -564,6 +680,29 @@ _register(Capability(
     example='[DO:history_lookup]{"limit":10}',
     daily_limit_key="capabilities.history_lookup_daily",
     impl=_impl_history_lookup,
+))
+
+_register(Capability(
+    name="inner_recall",
+    title="回想自己当时的思绪",
+    description="翻自己心里留下的话（没说出口的那半句）：想接上之前的心思、或对方问「你当时在想什么」时用",
+    params={"query": "可选，关键词", "count": "可选，条数默认 3"},
+    example='[DO:inner_recall]{"query":"星空","count":2}',
+    daily_limit_key="capabilities.inner_recall_daily",
+    impl=_impl_inner_recall,
+))
+
+_register(Capability(
+    name="manage_todo",
+    title="待办（记/完成/列）",
+    description="把「要做的事」记成可勾选的待办，或标记完成、列出还没做的（与「记住」不同：这些有完成状态）",
+    params={"action": "add（加一条）| done（标记完成）| list（列出来）",
+            "text": "add 用：要做的事；done 用：待办关键词",
+            "include_done": "list 可选，是否含已完成的"},
+    example='[DO:manage_todo]{"action":"add","text":"提醒对方买牛奶"}',
+    enums={"action": ["add", "done", "list"]},
+    daily_limit_key="capabilities.manage_todo_daily",
+    impl=_impl_manage_todo,
 ))
 
 

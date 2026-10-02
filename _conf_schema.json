@@ -1260,6 +1260,18 @@
         "type": "int",
         "default": 0,
         "hint": "每天最多翻几次最近的对话记录（0=不限）。"
+      },
+      "inner_recall_daily": {
+        "description": "「回想思绪」每日上限",
+        "type": "int",
+        "default": 0,
+        "hint": "每天最多翻几次自己的思绪留档（0=不限）。"
+      },
+      "manage_todo_daily": {
+        "description": "「待办」每日上限",
+        "type": "int",
+        "default": 0,
+        "hint": "每天最多做几次待办操作（加/完成/列，0=不限）。"
       }
     }
   },
