@@ -1978,6 +1978,10 @@ class StorytellerPlugin(Star):
                 anchors["voice"] = "（还没定说话风格，自然表达即可。）"
             # 0.164：先给裸占位符内容加语义标签（治本，替代 0.162 末尾【本次对话】补丁——两遍一遍带标签一遍不带）
             anchors = _labelize_anchors(template, anchors)
+            # 0.214：{思绪} 锚——思绪（思考内容连续化）也进入模板占位符体系，位置由用户模板决定
+            _inner_text, _inner_picked = self._prepare_inner_block(session_id)
+            anchors["inner"] = _inner_text
+            _tpl_used = template
             final_system = replace_template(template, anchors) or system_prompt
             # 0.158 模板健壮性：替换后仍残留标准占位符，或模板根本不含核心占位符（被改坏/占位符书写异常）
             # → 回退内置默认模板
@@ -1990,6 +1994,7 @@ class StorytellerPlugin(Star):
                 )
                 anchors.pop("reply", None)
                 final_system = replace_template(_DT, anchors)
+                _tpl_used = _DT
             # 0.156 防呆：人格注入体为空（"我是谁"缺失）时，模型会"诚实"索要设定——加一段指引用它
             # 直接自然回应（身份锚/风格/状态等其它锚照常注入；身份防认错锚恒非空，不能当"角色设定"判断）
             if not str(anchors.get("persona") or "").strip():
@@ -2012,6 +2017,9 @@ class StorytellerPlugin(Star):
             final_system += (
                 "\n\n注意：上方就是你本人，直接以本人平常的口吻回应对方刚才说的那句。"
             )
+            # 0.214：这条链路同样支持 {思绪}（模板没写就追加到尾部，保证内心戏不丢）
+            if _inner_text and "{思绪}" not in str(_tpl_used or ""):
+                final_system += "\n\n" + _inner_text
             # 0.162 对话语义标签已改为 0.164 的 _labelize_anchors（模板内直接带标签，不再追加【本次对话】段
             # 避免"裸文本+带标签补丁"并存的重复混乱）
             template_has_current = "{当前说话}" in template
@@ -2121,6 +2129,10 @@ class StorytellerPlugin(Star):
                 anchors["voice"] = "（还没定说话风格，自然表达即可。）"
             # 0.164：先给裸占位符内容加语义标签（治本，替代 0.162 末尾【本次对话】补丁——两遍一遍带标签一遍不带）
             anchors = _labelize_anchors(template, anchors)
+            # 0.214：{思绪} 锚——思绪（思考内容连续化）也进入模板占位符体系，位置由用户模板决定
+            _inner_text, _inner_picked = self._prepare_inner_block(session_id)
+            anchors["inner"] = _inner_text
+            _tpl_used = template
             final_system = replace_template(template, anchors) or system_prompt
             # 0.158 模板健壮性：替换后仍残留标准占位符，或模板根本不含核心占位符（被改坏/占位符书写异常）
             # → 回退内置默认模板
@@ -2133,6 +2145,7 @@ class StorytellerPlugin(Star):
                 )
                 anchors.pop("reply", None)
                 final_system = replace_template(_DT, anchors)
+                _tpl_used = _DT
             # 0.156 防呆：人格注入体为空（"我是谁"缺失）时，模型会"诚实"索要设定——加一段指引用它
             # 直接自然回应（身份锚/风格/状态等其它锚照常注入；身份防认错锚恒非空，不能当"角色设定"判断）
             if not str(anchors.get("persona") or "").strip():
@@ -2180,26 +2193,9 @@ class StorytellerPlugin(Star):
                     final_system += "\n\n" + _cap_decl
             except Exception as exc:
                 logger.warning("[Storyteller] 能力声明生成失败（跳过）: %s", exc)
-            # 0.204 思绪（内心持久化）：① 让它这轮藏起半句没说出口的思绪；② 把上一轮的思绪交给它接着想
-            _inner_picked: list[dict] = []
-            try:
-                if mindstream_mod.enabled(self):
-                    _instr = mindstream_mod.build_instruction(self)
-                    if _instr:
-                        final_system += _instr
-                    _cnt = mindstream_mod.inject_count(self)
-                    if _cnt > 0:
-                        _used = self._inner_injected.get(session_id) or set()
-                        _inner_picked = mindstream_mod.pick_for_injection(
-                            self.mind_store.inner_items(limit=20),
-                            session=session_id, count=_cnt, already=_used,
-                        )
-                        _inj = mindstream_mod.render_injection(self, _inner_picked)
-                        if _inj:
-                            final_system += "\n\n" + _inj
-            except Exception as exc:
-                logger.warning("[Storyteller] 思绪注入失败（跳过）: %s", exc)
-                _inner_picked = []
+            # 0.214：模板里没写 {思绪} → 追加到 system 尾部（老模板照样有内心戏；写了就由模板决定位置）
+            if _inner_text and "{思绪}" not in str(_tpl_used or ""):
+                final_system += "\n\n" + _inner_text
             # 0.162 对话语义标签已改为 0.164 的 _labelize_anchors（模板内直接带标签，不再追加【本次对话】段
             # 避免"裸文本+带标签补丁"并存的重复混乱）
             # 0.165 格式工整：注入后压缩连续空行（{记忆}/{天气}/{见闻} 空时模板会留出多个空行连排）
@@ -2617,6 +2613,36 @@ class StorytellerPlugin(Star):
         polished = await self.polisher.polish(event, content)
         polished = squeeze_reply(polished)  # 0.186：拍平换行/空行，避免 QQ 大空隙
         return polished if str(polished or "").strip() else ""
+
+    def _prepare_inner_block(self, session_id: str) -> tuple[str, list]:
+        """0.214：算好这一轮要注入的「思绪」文本（= 写下思绪的指令 + 上一轮的回注）。
+
+        返回 (文本, 本轮选中的留档条目)。关闭模块时返回空串。
+        模板里写了 `{思绪}` → 由模板决定它出现的位置；没写 → 调用方追加到 system 尾部
+        （老模板照样能用，功能不会因为没改模板就消失）。
+        """
+        picked: list = []
+        try:
+            if not mindstream_mod.enabled(self):
+                return "", []
+            parts: list[str] = []
+            instr = mindstream_mod.build_instruction(self)
+            if instr:
+                parts.append(instr.strip())
+            count = mindstream_mod.inject_count(self)
+            if count > 0:
+                used = self._inner_injected.get(session_id) or set()
+                picked = mindstream_mod.pick_for_injection(
+                    self.mind_store.inner_items(limit=20),
+                    session=session_id, count=count, already=used,
+                )
+                injection = mindstream_mod.render_injection(self, picked)
+                if injection:
+                    parts.append(injection.strip())
+            return "\n\n".join(p for p in parts if p), picked
+        except Exception as exc:
+            logger.warning("[Storyteller] 思绪注入失败（跳过）: %s", exc)
+            return "", []
 
     def _save_inner_archive(
         self,

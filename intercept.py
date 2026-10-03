@@ -116,6 +116,7 @@ TEMPLATE_PLACEHOLDERS: dict[str, str] = {
     "relationship": "{关系}",
     "voice": "{风格}",
     "presence": "{状态}",
+    "inner": "{思绪}",
     "schedule": "{日程}",
     "wardrobe": "{穿搭}",
     "memory": "{记忆}",
@@ -130,7 +131,7 @@ TEMPLATE_PLACEHOLDERS: dict[str, str] = {
 # 占位符显示顺序（前端 chips 与后端替换同序；人格/当前对话在前，各模块锚在后，回复内容最后）
 TEMPLATE_ORDER = [
     "persona", "context", "current_text", "current_user", "place", "identity",
-    "relationship", "voice", "presence", "schedule", "wardrobe", "memory",
+    "relationship", "voice", "presence", "inner", "schedule", "wardrobe", "memory",
     "weather", "mind", "image_wish", "search_result", "time", "reply",
 ]
 
@@ -149,6 +150,7 @@ DEFAULT_TEMPLATE = (
     "{关系}\n"
     "{风格}\n"
     "{状态}\n"
+    "{思绪}\n"
     "{日程}\n"
     "{穿搭}\n"
     "{记忆}\n"
@@ -174,6 +176,7 @@ LEGACY_DEFAULT_TEMPLATE = (
     "{关系}\n"
     "{风格}\n"
     "{状态}\n"
+    "{思绪}\n"
     "{日程}\n"
     "{记忆}\n"
     "{天气}\n"

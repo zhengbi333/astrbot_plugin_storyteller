@@ -45,7 +45,7 @@ const TITLES = {
   presence: ["状态锚", "此刻的心情与精力"],
   schedule: ["日程锚", "每日日程"],
   wardrobe: ["穿搭与衣柜", "当前穿搭与衣物库"],
-  mindstream: ["思绪", "没说出口的那半句：留档、回注与开关"],
+  mindstream: ["思绪", "思考内容连续化：每轮藏起半句没说出口的心里话，下一轮接着想（{思绪} 占位符）"],
   mind: ["内心世界", "梦境、思考与见闻"],
   memory: ["记忆", "你的长期记忆（约定/愿望/时间线）"],
   proactive: ["主动对话", "智能主动触达"],
@@ -2459,6 +2459,18 @@ async function renderMindstream() {
     const st = d.stats || {};
     const field = (key, fallback) => renderSettingField("mindstream", key, cfgItems[key] || fallback, cfgValues[key]);
     view.innerHTML = `
+      <section class="panel" style="margin-bottom:10px">
+        <div class="panel-head"><div><h3 class="panel-title">这个模块是做什么的</h3><span class="hint">思考内容连续化</span></div></div>
+        <p class="section-desc" style="margin:0">
+          每一轮回复时，它会另外写下<b>一句没说出口的心里话</b>——对方看不到，但会留档在这里；
+          下一轮再把这句话交回给它，让它接着往下想。这样它的在意、疑惑、忍住没说出口的话会像一条线延续下去，
+          而不是每轮都从零开始。
+        </p>
+        <p class="section-desc" style="margin:6px 0 0;opacity:.85">
+          注入位置由「拦＆改」模板里的 <span class="ph-hint-chip">{思绪}</span> 占位符决定（模板里没写时会自动追加到提示词末尾，功能不受影响）；
+          关掉总开关则完全不产生、也不回注。
+        </p>
+      </section>
       ${placeholderHintCard("mindstream")}
       <div class="rel-layout" style="align-items:flex-start">
         <div class="rel-left" style="flex:0 0 300px">
@@ -4166,7 +4178,7 @@ async function renderDiagSub() {
 /* ------------------------------------------------------------ 拦＆改：模板占位符 */
 /* 0.178 起：占位符清单由拦截接口下发（intercept/status.placeholders，16 个，含 {穿搭}/{回复}）；
    此常量仅在后端未返回时兜底（历史 14 个） */
-const TEMPLATE_PLACEHOLDERS = ["{人格}", "{当前说话}", "{上下文}", "{当前用户}", "{场合}", "{身份}", "{关系}", "{风格}", "{状态}", "{日程}", "{记忆}", "{天气}", "{见闻}", "{时间}"];
+const TEMPLATE_PLACEHOLDERS = ["{人格}", "{当前说话}", "{上下文}", "{当前用户}", "{场合}", "{身份}", "{关系}", "{风格}", "{状态}", "{思绪}", "{日程}", "{记忆}", "{天气}", "{见闻}", "{时间}"];
 
 /* 各模块注入占位符提示卡：标明该模块在「最终发送给对话 LLM 的信息格式」里提供哪些占位符 */
 const MODULE_PLACEHOLDERS = {
@@ -4185,6 +4197,9 @@ const MODULE_PLACEHOLDERS = {
   presence: [
     { ph: "{状态}", desc: "你此刻的心情/精力" },
     { ph: "{天气}", desc: "配置的当天天气" },
+  ],
+  mindstream: [
+    { ph: "{思绪}", desc: "思考内容连续化：写下这轮没说出口的心里话 + 把上一轮的思绪交回给它接着想（关掉模块则为空）" },
   ],
   schedule: [{ ph: "{日程}", desc: "今日日程（只注入日程，不含穿搭）" }],
   wardrobe: [{ ph: "{穿搭}", desc: "你当前穿什么（衣柜里选好的；只影响语气气质，不会主动提起）" }],
