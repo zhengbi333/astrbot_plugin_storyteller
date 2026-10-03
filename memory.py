@@ -19,6 +19,10 @@ COMMITMENT_HINTS = (
     "想要", "想一起", "一起去", "记得", "别忘了", "一定要",
     # 0.191：显式「记住/记一下」类话术补齐（此前只有「记得」，用户说「你记住xxx」检测不到）
     "记住", "记一下", "记下来", "记着", "帮我记", "记忆一下", "存一下", "存下来", "记录下来",
+    # 0.230：与 classify_remember 的 REMEMBER_PROMISE_STRONG 对齐。
+    # 此前两套词表不一致——「我们约好九点见」能被分类成 promise，却过不了这里的检测门，
+    # 于是**不会写入记忆**（答应了却没记住）。这里补齐强约定词里缺的几个。
+    "约好", "我们约", "承诺",
 )
 
 PROFILE_HINTS = (
@@ -100,7 +104,10 @@ def detect_commitment(text: str) -> bool:
     clean = (text or "").strip()
     if len(clean) < 4 or len(clean) > 200:
         return False
-    return any(hint in clean for hint in COMMITMENT_HINTS)
+    if any(hint in clean for hint in COMMITMENT_HINTS):
+        return True
+    # 0.230：再兜一层强约定词（两套词表历史上漂移过一次，这里保证不再漏）
+    return any(hint in clean for hint in REMEMBER_PROMISE_STRONG)
 
 
 def detect_profile(text: str) -> bool:
