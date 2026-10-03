@@ -13,7 +13,7 @@ from pathlib import Path
 from .log import logger
 
 DEFAULTS = {
-    "theme": "cosmic",           # 配色主题 key（前端定义每套主题的变量）
+    "theme": "tide",             # 配色主题 key（前端定义每套主题的变量）
     "scheme": "auto",            # 明暗模式：auto / light / dark
     "primary": "",               # 自定义主色，空 = 跟随主题
     "accent": "",                # 自定义辅色，空 = 跟随主题
@@ -26,6 +26,12 @@ DEFAULTS = {
 }
 
 _ALLOWED_FIELDS = frozenset(DEFAULTS.keys())
+
+# 0.219：前端 THEMES 里真实存在的主题 key（后端默认值曾写成 "cosmic"，而前端根本没有这套主题
+# → 新用户/重置外观后页面拿不到主题配色，外观页却显示"潮汐"，显示与实际不一致）。
+# 这里做白名单校验：未知/脏数据一律回落到 tide，用户配置写坏也能自愈。
+_KNOWN_THEMES = ("tide", "aurora", "pearl", "nebula", "deepsea", "fern", "rose", "onyx")
+_DEFAULT_THEME = "tide"
 
 _IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "bmp"}
 
@@ -76,7 +82,8 @@ class AppearanceManager:
             if str(result.get("scheme") or "auto") in {"auto", "light", "dark"}
             else "auto"
         )
-        result["theme"] = str(result.get("theme") or "cosmic")[:40]
+        theme = str(result.get("theme") or _DEFAULT_THEME).strip()[:40]
+        result["theme"] = theme if theme in _KNOWN_THEMES else _DEFAULT_THEME
         result["primary"] = str(result.get("primary") or "")[:40]
         result["accent"] = str(result.get("accent") or "")[:40]
         result["canvas"] = str(result.get("canvas") or "")[:40]

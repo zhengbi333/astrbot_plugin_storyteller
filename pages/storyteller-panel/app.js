@@ -321,7 +321,8 @@ function resolveMode(scheme) {
 }
 
 function themeVars(themeKey, mode) {
-  const theme = THEMES.find((item) => item.key === themeKey);
+  // 0.219：主题 key 未知（脏数据/旧默认值"cosmic"）时回落到 tide，而不是只剩明暗基础色
+  const theme = THEMES.find((item) => item.key === themeKey) || THEMES.find((item) => item.key === "tide");
   const base = mode === "dark" ? BASE_DARK : BASE_LIGHT;
   return { ...base, ...((theme && theme[mode]) || {}) };
 }
