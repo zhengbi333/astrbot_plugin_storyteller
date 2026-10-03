@@ -355,6 +355,28 @@ class MindStore:
                 "memory_id": str(memory_id or "")[:80],
             }
             items = self._data.setdefault("todos", [])
+            # 0.229 去重：同一件事被反复提起时不该堆成 t1/t2/t3——
+            # 回注时会重复列同一件事（显得"记性差"），还会白占 200 条上限。
+            #  · 带 memory_id：同 memory_id 且**未完成** → 视为同一件事（刷新文本与时间，不新增）；
+            #  · 不带 memory_id：同会话下文本完全相同且未完成 → 不重复登记；
+            #  · 已完成的不算重复（"又提了一次"可以重新登记）。
+            body_key = body[:300]
+            for existing in items:
+                if not isinstance(existing, dict) or existing.get("done"):
+                    continue
+                same_mem = bool(memory_id) and str(existing.get("memory_id") or "") == str(memory_id)
+                same_text = (
+                    not memory_id
+                    and str(existing.get("text") or "") == body_key
+                    and str(existing.get("session") or "") == str(session or "")
+                )
+                if same_mem or same_text:
+                    existing["text"] = body_key
+                    existing["at"] = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime())
+                    if session:
+                        existing["session"] = str(session or "")[:200]
+                    self._save()
+                    return existing
             items.insert(0, item)
             del items[200:]  # 含已完成在内最多留 200 条
             self._save()
