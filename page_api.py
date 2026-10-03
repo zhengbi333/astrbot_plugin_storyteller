@@ -1313,6 +1313,12 @@ class StorytellerWebApi:
             return True, "润色可用（模板 " + str(len(template)) + " 字）"
 
         def image_status() -> tuple[bool, str]:
+            """生图：**复用真实门槛**（image_gen 自己的 backend/_endpoints/_daily_used）。
+
+            0.218 修正：第 2 轮我按 `image.provider_id` 判"没配模型"，但真实门槛用的是
+            `api_enabled/api_base_url/api_api_key/api_model` 一组键——结果给用户报了**误报**
+            （他的 API 配置其实是完整的）。自检项必须与真实门槛同源，不能再自己猜键名。
+            """
             enabled = bool(plugin.config.bool("image.enabled", False))
             records = 0
             try:
@@ -1321,13 +1327,41 @@ class StorytellerWebApi:
                     records = len(store.records() or [])
             except Exception:
                 records = 0
-            backend = str(plugin.config.get("image.backend", "") or "astrbot").strip() or "astrbot"
-            provider_id = str(plugin.config.get("image.provider_id", "") or "").strip()
+            gen = getattr(plugin, "image_gen", None)
+            backend = "api"
+            endpoints = 0
+            used = 0
+            if gen is not None:
+                try:
+                    backend = str(gen.backend() or "api").strip() or "api"
+                except Exception:
+                    backend = "api"
+                try:
+                    endpoints = len(gen._endpoints() or [])
+                except Exception:
+                    endpoints = 0
+                try:
+                    used = int(gen._daily_used() or 0)
+                except Exception:
+                    used = 0
+            limit = max(0, int(plugin.config.int("image.max_daily", 0) or 0))
             if not enabled:
                 return True, "已在配置里关闭（不会生图；历史 " + str(records) + " 张）"
-            if backend == "api" and not provider_id:
-                return False, "生图已开启且后端为「独立 API」，但没有配置生图模型 → 无法生成"
-            return True, "生图可用（后端=" + backend + "，历史 " + str(records) + " 张）"
+            if backend == "api" and endpoints <= 0:
+                missing = ""
+                if gen is not None:
+                    try:
+                        missing = "；".join(gen._missing_fields() or [])
+                    except Exception:
+                        missing = ""
+                return False, "生图已开启，但独立 API 配置不完整" + (
+                    "：" + missing if missing else "（API 地址 / Key / 模型）")
+            if backend != "api" and not str(plugin.config.get("image.card_provider_id", "") or "").strip():
+                return False, "生图后端为「卡片渲染」但没有选择渲染模型"
+            if limit > 0 and used >= limit:
+                return True, "生图可用，但今日已达上限（" + str(used) + "/" + str(limit) + "）"
+            return True, ("生图可用（后端=" + backend + "，今日 " + str(used) + " 张"
+                          + ("，上限 " + str(limit) if limit > 0 else "，不限") + "；历史 " + str(records) + " 张）")
 
         def wardrobe_status() -> tuple[bool, str]:
             enabled = bool(plugin.config.bool("wardrobe.enabled", False))
