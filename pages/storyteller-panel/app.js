@@ -814,6 +814,10 @@ async function renderSilence() {
   const slValues = values.silence || {};
   const field = (key) => renderSettingField("silence", key, slSchema[key] || {}, slValues[key]);
   const masterItem = slSchema.enabled || { description: "启用智能沉默", type: "bool", default: true, hint: "" };
+  // 上游总开关：「回复链路」关掉时判定根本不会执行。它原本只在「关系」页露出，
+  // 判定归位到本页后若不管它就会变成"无处可改的隐藏开关"，故放到本页设置区最前。
+  const pipeSchema = (schema.pipeline && schema.pipeline.items) || {};
+  const pipeValues = values.pipeline || {};
   const restKeys = Object.keys(slSchema).filter((k) => k !== "enabled");
   const restHtml = sortSettingEntries(restKeys.map((k) => [k, slSchema[k]])).map(([k]) => field(k)).join("");
   view.innerHTML = `
@@ -844,6 +848,9 @@ async function renderSilence() {
       </div>
       <div class="silence-right">
         <div class="settings-grid">
+          ${renderSettingField("pipeline", "enabled",
+              pipeSchema.enabled || { description: "回复链路总开关", type: "bool", default: true, hint: "" },
+              pipeValues.enabled)}
           ${masterSwitch("silence-master", masterItem.description || "启用智能沉默", masterItem.hint || "", Boolean(slValues.enabled))}
           ${restHtml || '<div class="hint">暂无设置项</div>'}
         </div>
@@ -1464,6 +1471,9 @@ async function renderVoice() {
   const cvals = state.configValues || {};
   const voiceSchema = (cfg.voice && cfg.voice.items) || {};
   const voiceVals = cvals.voice || {};
+  // 口头禅两项由「回复链路」生成，语义属于说话方式 → 收纳到本页（此前无任何面板入口）
+  const pipeSchema = (cfg.pipeline && cfg.pipeline.items) || {};
+  const pipeValues = cvals.pipeline || {};
   const genItem = voiceSchema.provider_id || { description: "风格生成模型", type: "string", role: "provider", default: "" };
   const groupItem = voiceSchema.group_quiet || { description: "群聊降噪", type: "bool", default: true };
   view.innerHTML = `
@@ -1518,6 +1528,21 @@ async function renderVoice() {
             ${renderSettingField("voice", "group_quiet", groupItem, voiceVals.group_quiet)}
           </div>
           <div class="rel-setting-note">风格生成模型：「一键生成」直连此模型生成整套风格档案（不走主链）；留空按「留空回退模型」策略，驳回时生成失败并报错日志。</div>
+        </section>
+        <section class="panel" style="margin-top:16px">
+          <div class="panel-head">
+            <h3 class="panel-title">口头禅<span class="field-key">pipeline</span></h3>
+            <span class="hint">收纳自「回复链路」</span>
+          </div>
+          <div class="settings-grid" style="grid-template-columns:1fr">
+            ${renderSettingField("pipeline", "avoid_repeat_openers",
+                pipeSchema.avoid_repeat_openers || { description: "避免口头禅重复", type: "bool", default: true, hint: "" },
+                pipeValues.avoid_repeat_openers)}
+            ${renderSettingField("pipeline", "opener_nudge_enabled",
+                pipeSchema.opener_nudge_enabled || { description: "口头禅点名提醒", type: "bool", default: true, hint: "" },
+                pipeValues.opener_nudge_enabled)}
+          </div>
+          <div class="rel-setting-note">这两项会写进生成提示词：前者泛泛要求「别每句都用同一个起手词」，后者在你连着几条都用同一起手词时直接点名提醒（只统计最近 3 条、只看本进程内说过的话）。</div>
         </section>
       </div>
     </div>
