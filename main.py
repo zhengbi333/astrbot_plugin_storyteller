@@ -2157,6 +2157,7 @@ class StorytellerPlugin(Star):
             cap_round = 0
             cap_max_rounds = max(0, min(4, self.config.int("capabilities.max_rounds", 1)))
             _last_inner = ""  # 0.204：本轮最后一段"没说出口的思绪"（能力/打断重生成时取最新一次）
+            _round_t0 = time.time()  # 0.207：本轮耗时观测（生成/判定+表情包/润色）
             while True:
                 try:
                     from astrbot.api.event import MessageChain
@@ -2302,7 +2303,9 @@ class StorytellerPlugin(Star):
                     logger.warning("[Storyteller] 接管索要兜底重生成失败: %s", guard_exc)
                     content = "嗯，在呢。想聊点什么？"
             # 接管直连回复也被「润色」模块捕获：发送前按模板交给润色模型二次润色与人格校准
+            _polish_ms = 0.0
             if content:
+                _polish_t0 = time.time()
                 try:
                     polished = await self.polisher.polish(event, content)
                     polished = squeeze_reply(polished)  # 0.186：拍平换行/空行，避免 QQ 大空隙
@@ -2310,6 +2313,7 @@ class StorytellerPlugin(Star):
                         content = polished
                 except Exception:
                     pass
+                _polish_ms = (time.time() - _polish_t0) * 1000
             # 0.204 思绪留档：把这轮藏起来的半句记进留档（下一轮接着想 / 面板「思绪」可查可删）。
             # 放在判定之前：即使这轮判定沉默（没说出口），它的思绪也照样留下来——那正是"心里想过的"。
             try:
@@ -2352,14 +2356,12 @@ class StorytellerPlugin(Star):
             # 0.195：回复判定（沉默/草草回复）——接管直连此前绕过判定，导致「每条消息都必回」；
             # 这里补上：判定模型认为此刻不该接话（敷衍收尾/话题自然结束/重复道别）时就不发。
             # 保险：连续沉默不超过 silence_streak_limit 次（防止误判导致一直不理人）。
-            if content and self.config.bool("pipeline.takeover_judge_enabled", True) and not caps_done(event):
-                try:
-                    judged = await asyncio.wait_for(
-                        self.reply_pipeline.judge_for_takeover(event, content), timeout=25
-                    )
-                except Exception as exc:
-                    logger.warning("[Storyteller] 接管回复判定失败（按正常回复）: %s", exc)
-                    judged = None
+            # 0.207：判定与表情包判定**并行**（两者都只依赖生成结果、互不依赖）→ 省一次模型往返
+            _emoji_mark = ""
+            _judge_ms = 0.0
+            if content:
+                judged, _emoji_mark, _checks_sec = await self._post_checks_parallel(event, content)
+                _judge_ms = _checks_sec * 1000
                 if isinstance(judged, dict):
                     action = str(judged.get("action") or "send").strip().lower()
                     reason = str(judged.get("reason") or "")[:80]
@@ -2385,16 +2387,9 @@ class StorytellerPlugin(Star):
                         if brief:
                             content = brief
                             logger.info("[Storyteller] 判定草草回复: session=%s text=%s", session_id, brief[:20])
-            # 0.193：表情包判定（接管直连绕过主链判定，此前永远没有占位符 → 表情包从不发送）
-            # 0.197 去重：模型已通过 emoji_send 能力发过 → 不再走判定（避免双发）
-            if content and "emoji_send" not in caps_done(event):
-                try:
-                    pipeline = getattr(self, "reply_pipeline", None)
-                    picker = getattr(pipeline, "apply_emoji_pick", None)
-                    if callable(picker):
-                        content = await picker(event, content)
-                except Exception as exc:
-                    logger.warning("[Storyteller] 接管表情包判定异常（跳过）: %s", exc)
+            # 表情包标记：贴在最终文字末尾（判定把它改成短句时标记也不丢）
+            if content and _emoji_mark and _emoji_mark not in content:
+                content = f"{content} {_emoji_mark}"
             # 0.197 保险：最终文本再剔一次能力标记（任何分支都不该把 [DO:...] 发给用户）
             if content:
                 try:
@@ -2410,6 +2405,21 @@ class StorytellerPlugin(Star):
                 except Exception:
                     pass
             sent_ok = False
+            # 0.207：本轮耗时观测（一眼看出时间花在哪；判定与表情包已并行，故合并计）
+            try:
+                _total_ms = (time.time() - _round_t0) * 1000
+                _tail_ms = max(0.0, _total_ms - _judge_ms - _polish_ms)
+                logger.info(
+                    "[Storyteller] 本轮耗时: 生成+其他 %.0fms / 判定&表情包 %.0fms(并行) / 润色 %.0fms / 合计 %.0fms",
+                    _tail_ms, _judge_ms, _polish_ms, _total_ms,
+                )
+                self._last_timing = {
+                    "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                    "gen_ms": int(_tail_ms), "checks_ms": int(_judge_ms), "polish_ms": int(_polish_ms),
+                    "total_ms": int(_total_ms),
+                }
+            except Exception:
+                pass
             if content:
                 try:
                     session_id = str(getattr(event, "unified_msg_origin", "") or "")
@@ -2493,6 +2503,59 @@ class StorytellerPlugin(Star):
             return bool(self.config.bool("capabilities.suppress_regex_fallback", True))
         except Exception:
             return False
+
+    async def _post_checks_parallel(
+        self, event: AstrMessageEvent, content: str
+    ) -> tuple[dict[str, Any] | None, str, float]:
+        """并行执行「回复判定」与「表情包判定」（0.207）。
+
+        两者都只依赖刚生成的内容、互不依赖，串行等于白白多等一次模型往返（实测每轮省 0.5~1s）。
+        - 判定：可能返回 silence / brief / send（决定这轮发不发、发多短）
+        - 表情包：只负责从图库挑一张并回传 `[EMOJI:分类]` 标记（不改变文字本身）
+
+        返回 (判定结果, 表情包标记, 并行耗时秒)。任一失败都不影响另一个（各自兜底）。
+        """
+        started = time.time()
+        judge_task = None
+        emoji_task = None
+        if self.config.bool("pipeline.takeover_judge_enabled", True) and not caps_done(event):
+            judge_task = asyncio.ensure_future(self._judge_safe(event, content))
+        if "emoji_send" not in caps_done(event):
+            emoji_task = asyncio.ensure_future(self._emoji_pick_safe(event, content))
+        judged: dict[str, Any] | None = None
+        mark = ""
+        if judge_task is not None:
+            try:
+                judged = await judge_task
+            except Exception as exc:
+                logger.warning("[Storyteller] 回复判定失败（按正常回复）: %s", exc)
+                judged = None
+        if emoji_task is not None:
+            try:
+                mark = await emoji_task
+            except Exception as exc:
+                logger.warning("[Storyteller] 表情包判定失败（跳过）: %s", exc)
+                mark = ""
+        return judged, mark, time.time() - started
+
+    async def _judge_safe(self, event: AstrMessageEvent, content: str) -> dict[str, Any] | None:
+        """回复判定（带超时；异常向上抛，由调用方兜底为"正常回复"）。"""
+        return await asyncio.wait_for(
+            self.reply_pipeline.judge_for_takeover(event, content), timeout=25
+        )
+
+    async def _emoji_pick_safe(self, event: AstrMessageEvent, content: str) -> str:
+        """表情包判定：只回传 `[EMOJI:分类]` 标记（不夹带文字，便于与判定结果自由组合）。"""
+        pipeline = getattr(self, "reply_pipeline", None)
+        picker = getattr(pipeline, "apply_emoji_pick", None)
+        if not callable(picker):
+            return ""
+        picked = await picker(event, content)
+        try:
+            found = re.search(r"\[EMOJI:[^\]]+\]", str(picked or ""))
+            return found.group(0) if found else ""
+        except Exception:
+            return ""
 
     async def _generate_once(
         self,
