@@ -235,9 +235,9 @@ class StorytellerPlugin(Star):
         self._last_presence_beat: float = 0.0
         self._profile_task: asyncio.Task | None = None
         logger.info(
-            "%s 已加载 v%s，数据目录=%s",
+            "%s 已加载 %s，数据目录=%s",
             PLUGIN_DISPLAY,
-            PLUGIN_VERSION,
+            PLUGIN_VERSION,  # 版本号本身已带 alpha- 前缀，不再叠加 v（否则显示成 valpha-0.xxx）
             self.data_dir,
         )
 
@@ -2082,8 +2082,9 @@ class StorytellerPlugin(Star):
                 "\n\n注意：上方就是你本人，直接以本人平常的口吻回应对方刚才说的那句。"
             )
             # 0.197：能力声明段（接管直连不带 tools，改为告诉模型"你能做什么 + 用 [DO:能力]{json} 表达意愿"）
+            # 0.206：原生工具已生效时只给一句提示（工具清单随请求一起发过去；完整清单曾占 system 的 55%）
             try:
-                _cap_decl = build_declaration(self, "接管")
+                _cap_decl = build_declaration(self, "接管", brief=self._tools_active())
                 if _cap_decl:
                     final_system += "\n\n" + _cap_decl
             except Exception as exc:

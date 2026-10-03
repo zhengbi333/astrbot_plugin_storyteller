@@ -779,11 +779,22 @@ def cap_name_from_tool(tool_name: str) -> str:
     return name[6:] if name.startswith("story_") else name
 
 
-def build_declaration(plugin: Any, mode: str) -> str:
-    """生成接管模式的「能力声明段」（模型据此知道能做什么、怎么表达意愿）。"""
+def build_declaration(plugin: Any, mode: str, *, brief: bool = False) -> str:
+    """生成接管模式的「能力声明段」。
+
+    `brief=True`（原生工具已生效时）：**只给一句提示**——工具清单本来就随请求一起发过去了，
+    再往 system 里塞一份完整清单纯属重复（实测那段曾占 system 的 55%），既抢模型注意力又费 token。
+    `brief=False`（文本协议是唯一通道时）：给完整清单（名称/说明/参数/示例），否则模型不知道该写什么标记。
+    """
     caps = available_capabilities(plugin, mode)
     if not caps:
         return ""
+    if brief:
+        return (
+            "【能做的事】需要真的做点什么时（记住、查资料、画图、改日程/穿搭、发表情、翻记录、"
+            "记待办、回想自己想过什么…），直接调用对应工具去做；只有工具返回成功才算做到了，"
+            "别只在嘴上答应。不需要做事时正常说话就好。"
+        )
     lines = [
         "【你可以主动做的事】（想做的时候，在回复里按格式写出下面这种标记，"
         "系统会替你去执行、然后把结果给你；不要假装已经做了）：",
