@@ -113,19 +113,22 @@ class ReplyPolisher:
                 return raw
             if "{回复}" not in template:
                 prompt = prompt.rstrip() + "\n\n请润色下面这句（原文）：\n" + raw
-            import logging as _lg
-
-            _lg.getLogger("astrbot.plugin_storyteller").info(
-                "[Storyteller] 润色排查(临时): raw_len=%d raw=%s prompt前180=%s",
-                len(raw), raw[:100].replace("\n", " "),
-                prompt[:180].replace("\n", "⏎"),
-            )
             resp = await self._call_with_timeout(provider, prompt)
             self._plugin._record_usage(resp, "rewrite", provider_id or "default")
             polished = str(getattr(resp, "completion_text", "") or "").strip() or raw
-            _lg.getLogger("astrbot.plugin_storyteller").info(
-                "[Storyteller] 润色排查(临时): polished=%s", polished[:120].replace("\n", " ")
-            )
+            # 0.222 输出守门：润色是"把原话改得更顺"，不该变成另一篇文章——
+            # ① 明显长于原文（> max(60, 原文×3+30)）判为失控 → 回退原回复（防止把提示词/解释也发出去）；
+            # ② 整体被引号或书名号包住时剥掉外层（模型爱加「…」）。
+            if len(polished) > max(60, len(raw) * 3 + 30):
+                logging.getLogger("astrbot.plugin_storyteller").warning(
+                    "[Storyteller] 润色结果异常偏长（%d 字 vs 原文 %d 字），已回退原回复",
+                    len(polished), len(raw),
+                )
+                return raw
+            if len(polished) >= 2 and polished[0] in "「“\"'《" and polished[-1] in "」”\"'》":
+                stripped = polished[1:-1].strip()
+                if stripped:
+                    polished = stripped
             self.buffer.record(
                 {
                     "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
