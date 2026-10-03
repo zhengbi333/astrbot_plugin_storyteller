@@ -417,6 +417,12 @@
         "default": "",
         "hint": "日程生成用；留空按「留空回退模型」策略解析。"
       },
+      "auto_refresh_on_new_day": {
+        "description": "跨天自动重排日程",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后：发现日程还是前几天的（过了午夜）时，会在下一条消息到达时自动重排一次当天日程（每天最多一次，失败保持旧日程）。关闭则只在你手动「一键生成」时更新——注意过期日程不会再说成「此刻正在做的事」。"
+      },
       "diary_time": {
         "description": "写日记时间(HH:MM)",
         "type": "string",

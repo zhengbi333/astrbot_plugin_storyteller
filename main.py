@@ -3272,6 +3272,19 @@ class StorytellerPlugin(Star):
                     asyncio.ensure_future(self._refresh_presence(event=event))
         except Exception:
             pass
+        # 0.227 跨天自动重排日程：过期日程会让模型把几天前的安排说成"此刻在做什么"。
+        # 每天最多试一次（失败也记标记，不反复烧 token）；可用 schedule.auto_refresh_on_new_day 关闭。
+        try:
+            if self.config.bool("schedule.auto_refresh_on_new_day", True):
+                from .schedule import is_stale as _sched_stale
+
+                _sched = self.schedule_store.load()
+                _day_key = time.strftime("%Y-%m-%d")
+                if _sched_stale(_sched) and getattr(self, "_schedule_refresh_tried", "") != _day_key:
+                    self._schedule_refresh_tried = _day_key
+                    asyncio.ensure_future(self._refresh_schedule(event=event))
+        except Exception as exc:
+            logger.warning("[Storyteller] 日程跨天检查异常（忽略）: %s", exc)
 
     # ------------------------------------------------------------ 实时日程/穿搭调整（像人）
 
@@ -4255,6 +4268,36 @@ class StorytellerPlugin(Star):
             result["error"] = str(exc) or type(exc).__name__
             logger.warning("[Storyteller] 日程自动生成失败: %s", exc)
             return result
+
+    async def _refresh_schedule(self, *, event: Any = None) -> None:
+        """跨天自动重排日程（0.227）。失败静默——注入侧已有"过期就不当作此刻"的兜底。"""
+        try:
+            from .models import chat_text, resolve_chat_provider
+            from .schedule import build_schedule_generate_prompt, parse_schedule
+
+            provider, provider_id = resolve_chat_provider(self.context, self.config, "schedule")
+            if provider is None:
+                logger.info("[Storyteller] 跨天重排日程跳过：未配置日程模型（回退模型也未设）")
+                return
+            # 注意：build_schedule_generate_prompt 是**纯关键字参数**；ScheduleStore 的写入方法是 save_entries
+            old = self.schedule_store.load() or {}
+            prompt = build_schedule_generate_prompt(
+                persona_injection=str(self.persona_store.injection_text() or "")[:600],
+                future=old.get("future") or [],
+                backlog=old.get("backlog") or [],
+            )
+            resp = await chat_text(provider, self.config, prompt=prompt,
+                                   session_id="storyteller_schedule_refresh")
+            self._record_usage(resp, "schedule", provider_id or "default")
+            parsed = parse_schedule(str(getattr(resp, "completion_text", "") or ""))
+            if not parsed or not parsed.get("entries"):
+                logger.warning("[Storyteller] 跨天重排日程失败（输出无法解析），保持旧日程")
+                return
+            saved = self.schedule_store.save_entries(parsed.get("entries"))
+            logger.info("[Storyteller] 跨天已重排日程: 条目=%s 日期=%s",
+                        len((saved or {}).get("entries") or []), (saved or {}).get("date"))
+        except Exception as exc:
+            logger.warning("[Storyteller] 跨天重排日程异常（忽略）: %s", exc)
 
     async def _refresh_presence(self, *, manual: bool = False, event: AstrMessageEvent | None = None) -> None:
         """按「当下」演化状态：时间/时间底色/日程/天气/最近余波/最近对话/上次状态。

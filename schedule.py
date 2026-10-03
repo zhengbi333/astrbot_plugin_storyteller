@@ -187,8 +187,29 @@ def current_activity(schedule: Any, now_hhmm: str) -> str:
     return ""
 
 
+def is_stale(schedule: Any, today: str = "") -> bool:
+    """日程是否已过期（0.227）：`date` 与今天不符即为过期。
+
+    日程是"按天"的，但 current_activity 只按 HH:MM 匹配、不看日期 ——
+    过了午夜（或几天没聊）后，旧日程会被继续当作"你现在正在做的事"注入，
+    模型就会把几天前的安排当成此刻（说错"我现在在实验室"）。这里显式判过期。
+    """
+    if not isinstance(schedule, dict):
+        return True
+    day = str(schedule.get("date") or "").strip()
+    if not day:
+        return True
+    return day != (today or _today())
+
+
 def build_schedule_anchor(schedule: Any, now_hhmm: str) -> str:
     """把当前日程渲染成注入文本（仅素材，不照搬）。"""
+    # 0.227：过期日程不再给"你现在正在：X"（避免把几天前的安排说成此刻）
+    if is_stale(schedule):
+        return (
+            "【当前日程】\n今天的安排还没排（上一次排的是 " + str((schedule or {}).get("date") or "更早")
+            + "）。按你平常的作息自然表现即可，不要主动提日程或编造此刻在做什么。"
+        )
     activity = current_activity(schedule, now_hhmm)
     if not activity:
         return ""
