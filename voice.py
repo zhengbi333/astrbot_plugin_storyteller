@@ -154,6 +154,7 @@ def build_voice_anchor(
     voice: dict[str, Any],
     place: str = "",
     group_quiet: bool = False,
+    verbosity: str = "",
 ) -> str:
     """把风格档案渲染成注入文本；群聊降噪开启且为群聊场合时追加收敛提示。"""
     if not isinstance(voice, dict):
@@ -163,8 +164,9 @@ def build_voice_anchor(
         lines.append(f"语气基调：{voice['tone']}")
     if voice.get("sentence_length"):
         lines.append(f"句子长短：{voice['sentence_length']}")
-    if voice.get("verbosity"):
-        lines.append(f"话量倾向：{voice['verbosity']}")
+    amount = str(verbosity or voice.get("verbosity") or "").strip()
+    if amount:
+        lines.append(f"话量倾向：{amount}")
     if voice.get("punctuation"):
         lines.append(f"标点与表情习惯：{voice['punctuation']}")
     if voice.get("address"):

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import time
+import re
 from typing import Any
 
 # 新模块的键 → 旧键（按优先级排列，用于兼容升级前的配置）
@@ -125,6 +126,8 @@ def _schedule_facts(plugin: Any) -> tuple[str, bool]:
     try:
         from .schedule import current_activity, is_stale
 
+        if not plugin.config.bool("schedule.enabled", True):
+            return "", False
         store = getattr(plugin, "schedule_store", None)
         if store is None:
             return "", False
@@ -136,7 +139,10 @@ def _schedule_facts(plugin: Any) -> tuple[str, bool]:
         activity = str(current_activity(schedule, time.strftime("%H:%M")) or "").strip()
         if not activity:
             return "", False
-        return activity, any(word in activity for word in _SLEEP_WORDS)
+        sleeping = any(word in activity for word in _SLEEP_WORDS)
+        if re.search(r"睡不着|不(?:想|能|要|会)?睡|还没睡|尚未入睡|起床|醒来", activity):
+            sleeping = False
+        return activity, sleeping
     except Exception:
         return "", False
 
@@ -165,12 +171,15 @@ def build_rules_text(*, brief_enabled: bool = True, night_silence: bool = True) 
     """判定规则文案（silence / brief / send 的口径）。"""
     silence_rule = (
         "- action 为 silence：这条消息不值得回。典型情形：用户只是「嗯/哦/好/行/知道了」这类敷衍收尾、"
-        "话题已经自然结束、或此刻沉默更自然"
+        "话题已经自然结束、或此刻沉默更自然。不要把一句短消息直接当作敷衍："
+        "若它在确认仍未处理的问题、表达求助或继续前一话题，应正常回应"
     )
     if night_silence:
         silence_rule += (
             "；若她正在睡觉，或状态明显是深夜困倦，而对方只是「在吗/在么/嗯」这类没有实质内容的搭话，"
-            "也应当判 silence（人在睡觉时不必秒回，这比硬答一句更像人）"
+            "可以判 silence；这是允许沉默的情境，不是强制规则。"
+            "有明确问题、求助、紧急情况或此前尚未回应的请求时，应优先正常回应，"
+            "不能仅凭「在吗」两个字忽略其后附带的信息"
         )
     silence_rule += "，text 用空字符串；"
 
@@ -183,3 +192,37 @@ def build_rules_text(*, brief_enabled: bool = True, night_silence: bool = True) 
         )
     lines.append("- action 为 send：正常回复，text 是最终发送的完整文本；")
     return "\n".join(lines)
+
+
+def apply_decision(plugin: Any, event: Any, judged: Any, original: str) -> dict:
+    """统一主链和接管的沉默限额；模型失败、工具完成或关闭时保持正常回复。"""
+    session_id = str(getattr(event, "unified_msg_origin", "") or "")
+    streaks = getattr(plugin, "_silence_streak", None)
+    if not isinstance(streaks, dict):
+        streaks = plugin._silence_streak = {}
+    from .capabilities import caps_done
+
+    if not enabled(plugin.config) or caps_done(event) or not isinstance(judged, dict):
+        if session_id:
+            streaks[session_id] = 0
+        return {"action": "send", "text": original}
+    result = dict(judged)
+    action = str(result.get("action") or "send").strip().lower()
+    if action == "silence" and session_id:
+        limit = streak_limit(plugin.config)
+        streak = max(0, int(streaks.get(session_id, 0) or 0))
+        if streak < limit:
+            streaks[session_id] = streak + 1
+            result.update(action="silence", text="")
+            return result
+        result["forced_reply"] = True
+    if session_id:
+        streaks[session_id] = 0
+    text = str(result.get("text") or "").strip()
+    if action == "brief" and brief_enabled(plugin.config) and text and len(text) <= 20:
+        result.update(action="brief", text=text)
+    elif action == "send":
+        result.update(action="send", text=text or original)
+    else:
+        result.update(action="send", text=original)
+    return result

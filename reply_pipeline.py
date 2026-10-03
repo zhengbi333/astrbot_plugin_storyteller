@@ -320,6 +320,7 @@ class ReplyPipeline:
         original = squeeze_reply(str(getattr(resp, "completion_text", "") or ""))
         if not original:
             return ""
+        from . import silence as silence_mod
         user_text = str(getattr(event, "message_str", "") or "").strip()
         presence = self._presence_text()
         relationship = self._relationship_text(event)
@@ -329,9 +330,8 @@ class ReplyPipeline:
         if not rewritten:
             return original
         judged = await self._judge(rewritten, user_text, presence, relationship)
-        if judged is None:
-            return rewritten
-        action = str(judged.get("action") or "send").strip()
+        judged = silence_mod.apply_decision(self._plugin, event, judged, rewritten)
+        action = judged["action"]
         if action == "silence":
             logger.info("[Storyteller] 判定沉默，不回复: session=%s", getattr(event, "unified_msg_origin", ""))
             return ""

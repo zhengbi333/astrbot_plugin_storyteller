@@ -1363,6 +1363,7 @@ class StorytellerPlugin(Star):
                     voice,
                     place=self._place_label(event),
                     group_quiet=self.config.bool("voice.group_quiet", True),
+                    verbosity=str(self.config.get("voice.verbosity", "") or ""),
                 )
                 if self.config.bool("voice.enabled", True)
                 else ""
@@ -2427,16 +2428,16 @@ class StorytellerPlugin(Star):
                     event, content, with_polish=_parallel_polish
                 )
                 _judge_ms = _checks_sec * 1000
+                judged = silence_mod.apply_decision(self, event, judged, content)
                 if isinstance(judged, dict):
-                    action = str(judged.get("action") or "send").strip().lower()
+                    action = judged["action"]
                     reason = str(judged.get("reason") or "")[:80]
                     limit = silence_mod.streak_limit(self.config)
                     streak = int(self._silence_streak.get(session_id, 0))
-                    if action == "silence" and streak < limit:
-                        self._silence_streak[session_id] = streak + 1
+                    if action == "silence":
                         logger.info(
                             "[Storyteller] 判定沉默，本轮不回复: session=%s 连续=%s/%s reason=%s",
-                            session_id, streak + 1, limit, reason,
+                            session_id, streak, limit, reason,
                         )
                         # 沉默也要留档：没说出口的正是"心里想过的"
                         self._save_inner_archive(session_id, event, content, _last_inner, _inner_picked)
@@ -2446,9 +2447,8 @@ class StorytellerPlugin(Star):
                         )
                         self._stop_llm(event)
                         return
-                    if action == "silence":
+                    if judged.get("forced_reply"):
                         logger.info("[Storyteller] 连续沉默达上限（%s），强制回复一次: session=%s", limit, session_id)
-                    self._silence_streak[session_id] = 0
                     if action == "brief" and silence_mod.brief_enabled(self.config):
                         _brief_text = str(judged.get("text") or "").strip()
                         # 0.234 保险：brief 只该是「？」这类极短反应；异常偏长说明判定跑偏，
@@ -3062,6 +3062,9 @@ class StorytellerPlugin(Star):
                 )
             else:
                 resp.completion_text = final_text
+                if not final_text:
+                    # LLMResponse 可能同时带原始 result_chain；沉默必须一起清掉。
+                    resp.result_chain = None
         except Exception as exc:
             logger.warning("[Storyteller] 回复链路处理异常: %s", exc)
 

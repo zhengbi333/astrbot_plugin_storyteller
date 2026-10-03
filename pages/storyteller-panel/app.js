@@ -1526,6 +1526,7 @@ async function renderVoice() {
           <div class="settings-grid" style="grid-template-columns:1fr">
             ${renderSettingField("voice", "provider_id", genItem, voiceVals.provider_id)}
             ${renderSettingField("voice", "group_quiet", groupItem, voiceVals.group_quiet)}
+            ${renderSettingField("voice", "verbosity", voiceSchema.verbosity || {description:"话量覆盖", type:"string"}, voiceVals.verbosity)}
           </div>
           <div class="rel-setting-note">风格生成模型：「一键生成」直连此模型生成整套风格档案（不走主链）；留空按「留空回退模型」策略，驳回时生成失败并报错日志。</div>
         </section>
