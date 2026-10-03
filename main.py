@@ -26,7 +26,7 @@ from .diary import DiaryStore, build_diary_prompt
 from .emoji import EmojiStore
 from .image_gen import ImageGen, detect_image_intent
 from .intercept import InterceptBuffer, SentRequestBuffer, utc_now
-from .capabilities import build_declaration, build_tool_schemas, cap_name_from_tool, caps_done, dispatch as cap_dispatch, format_results as cap_format, mark_cap_done, parse_marks, strip_marks
+from .capabilities import build_declaration, build_tool_schemas, cap_name_from_tool, caps_done, dispatch as cap_dispatch, format_results as cap_format, is_readonly_cap as cap_is_readonly, mark_cap_done, parse_marks, strip_marks
 from . import mindstream as mindstream_mod
 from .log import logger, setup as setup_logging
 from .memory import (
@@ -2793,6 +2793,11 @@ class StorytellerPlugin(Star):
         messages.append({"role": "user", "content": str(call_prompt)})
         rounds = max(0, min(4, int(max_rounds or 0)))
         allowed = {str((tool.get("function") or {}).get("name") or "") for tool in tools}
+        # 0.213：只读能力并发开关（默认开）
+        try:
+            parallel_ro = self.config.bool("capabilities.parallel_readonly", True)
+        except Exception:
+            parallel_ro = True
         results = []
         marks = []
         input_other = input_cached = output = 0
@@ -2834,6 +2839,11 @@ class StorytellerPlugin(Star):
                 "role": "assistant", "content": str(getattr(resp, "completion_text", "") or ""),
                 "tool_calls": calls,
             })
+            # 0.213：把这一轮的 tool_calls 先分拣——**只读能力可以并发**（查资料/翻留档互不影响），
+            # 写类仍按顺序执行（并发写会有竞态：两个能力同时改同一个文件时后写的会覆盖先写的）。
+            # 校验失败的（超额 / 未提供 / 参数坏）照旧给出拒绝结果，不执行。
+            planned: list[tuple[int, str, dict]] = []
+            ro_planned: list[tuple[int, str, dict]] = []
             for index, call in enumerate(calls):
                 fn = call.get("function") or {}
                 name = str(fn.get("name") or "")
@@ -2843,19 +2853,41 @@ class StorytellerPlugin(Star):
                         raise ValueError("参数必须为对象")
                 except (ValueError, TypeError):
                     payload = None
+                cap_name = cap_name_from_tool(name)
                 if index >= 3:
-                    result = {"ok": False, "status": "limited", "message": "本轮最多执行三个能力"}
+                    planned.append((index, "", {"ok": False, "status": "limited", "message": "本轮最多执行三个能力"}))
                 elif name not in allowed:
-                    result = {"ok": False, "status": "forbidden", "message": "本轮未提供这个工具"}
+                    planned.append((index, "", {"ok": False, "status": "forbidden", "message": "本轮未提供这个工具"}))
                 elif payload is None:
-                    result = {"ok": False, "status": "error", "message": "工具参数不是有效 JSON 对象"}
+                    planned.append((index, "", {"ok": False, "status": "error", "message": "工具参数不是有效 JSON 对象"}))
+                elif parallel_ro and cap_is_readonly(cap_name):
+                    ro_planned.append((index, cap_name, payload))
                 else:
-                    result = await cap_dispatch(self, event, cap_name_from_tool(name), payload)
+                    planned.append((index, cap_name, payload))
+            # 只读的并发跑（只有一个时没必要并发）；写类逐条 await
+            if len(ro_planned) >= 2:
+                gathered = await asyncio.gather(
+                    *(cap_dispatch(self, event, cap_name, payload) for _, cap_name, payload in ro_planned),
+                    return_exceptions=True,
+                )
+                for (index, _cap_name, _payload), outcome in zip(ro_planned, gathered):
+                    if isinstance(outcome, BaseException):
+                        logger.warning("[Storyteller] 只读能力并发执行异常: %s", outcome)
+                        outcome = {"ok": False, "status": "error", "message": f"执行失败：{outcome}"}
+                    planned.append((index, "", outcome))
+            else:
+                planned.extend(ro_planned)
+            for index, cap_name, payload_or_result in sorted(planned, key=lambda item: item[0]):
+                if cap_name:
+                    result = await cap_dispatch(self, event, cap_name, payload_or_result)
+                else:
+                    result = payload_or_result
                 results.append(result)
                 mark = str(result.get("mark") or "")
                 if mark and mark not in marks:
                     marks.append(mark)
                 # 每个 tool_call 都必须有回填，超额项返回拒绝结果而不是丢弃。
+                call = calls[index]
                 messages.append({
                     "role": "tool", "tool_call_id": str(call.get("id") or ""),
                     "content": _json.dumps(result, ensure_ascii=False, default=str),

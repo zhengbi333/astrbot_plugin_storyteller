@@ -39,6 +39,10 @@ class Capability:
     daily_limit_key: str = ""                   # 每日限额配置键（空=不限）
     enums: dict[str, list[str]] = field(default_factory=dict)  # 枚举型参数的取值
     impl: Callable[..., Any] | None = None      # async (plugin, event, payload) -> dict
+    # 0.213：只读能力（查资料/翻留档，不改任何状态）。
+    # 模型一轮里同时要好几件事时，只读的可以并发跑（省一次往返），写类的仍按顺序执行——
+    # 写类并发会有竞态（比如两个能力同时改同一个文件，后写的覆盖先写的）。
+    readonly: bool = False
 
     def declaration(self) -> str:
         """生成给模型看的单行声明（接管模式声明段用）。"""
@@ -585,6 +589,7 @@ _register(Capability(
     params={"query": "要回忆的关键词或问题", "top_k": "可选，默认 5"},
     example='[DO:memory_recall]{"query":"对方的口味偏好"}',
     daily_limit_key="capabilities.memory_recall_daily",
+    readonly=True,
     impl=_impl_memory_recall,
 ))
 
@@ -595,6 +600,7 @@ _register(Capability(
     params={"query": "搜索词"},
     example='[DO:web_lookup]{"query":"RTX 5090 显卡价格"}',
     daily_limit_key="capabilities.web_lookup_daily",
+    readonly=True,
     impl=_impl_web_lookup,
 ))
 
@@ -679,6 +685,7 @@ _register(Capability(
     params={"limit": "可选，默认 10 条"},
     example='[DO:history_lookup]{"limit":10}',
     daily_limit_key="capabilities.history_lookup_daily",
+    readonly=True,
     impl=_impl_history_lookup,
 ))
 
@@ -689,6 +696,7 @@ _register(Capability(
     params={"query": "可选，关键词", "count": "可选，条数默认 3"},
     example='[DO:inner_recall]{"query":"星空","count":2}',
     daily_limit_key="capabilities.inner_recall_daily",
+    readonly=True,
     impl=_impl_inner_recall,
 ))
 
@@ -777,6 +785,12 @@ def cap_name_from_tool(tool_name: str) -> str:
     """工具名 → 能力名（去掉 story_ 前缀）。"""
     name = str(tool_name or "").strip()
     return name[6:] if name.startswith("story_") else name
+
+
+def is_readonly_cap(name: str) -> bool:
+    """这个能力是否只是查/翻（不改任何状态）——0.213 用它决定能不能并发执行。"""
+    cap = CAPABILITIES.get(str(name or "").strip())
+    return bool(cap is not None and cap.readonly)
 
 
 def build_declaration(plugin: Any, mode: str, *, brief: bool = False) -> str:
