@@ -4772,6 +4772,21 @@ async function renderModels() {
       </div>
     </section>`;
   // 三栏：每组一个小标题 + 该模块全部模型设置项（与各模块页同一变量，改哪边都同步）
+  // 0.217：留空时明确标出"实际会用哪个模型"——此前字段空着，用户看不出它会走回退（透明化）
+  const fbOn = (values.models || {}).fallback_enabled !== false;
+  const fbIdForHint = String((values.models || {}).fallback_provider_id || "").trim();
+  const modelHint = (m, k) => {
+    if (m === "models") return "";
+    if (String(valOf(m, k) || "").trim()) return "";
+    // 三种状态分开说，避免与字段自带的「按留空回退模型策略」说明语义打架
+    if (!fbOn) {
+      return `<div class="hint" style="opacity:.9;color:#f59e0b;margin:-4px 0 8px">「留空回退模型」已关闭 → 这个功能没配模型时，调用会被驳回</div>`;
+    }
+    if (!fbIdForHint) {
+      return `<div class="hint" style="opacity:.9;color:#f59e0b;margin:-4px 0 8px">回退模型本身也没设置 → 这个功能的调用会被驳回</div>`;
+    }
+    return `<div class="hint" style="opacity:.75;margin:-4px 0 8px">未配置 → 实际走回退模型 <b>${esc(fbIdForHint)}</b></div>`;
+  };
   const column = (col) => `
     <section class="panel">
       <div class="panel-head"><h3 class="panel-title">${esc(col.title)}</h3><span class="hint">${col.groups.length} 个模块</span></div>
@@ -4779,7 +4794,7 @@ async function renderModels() {
       ${col.groups.map(([m, name, keys]) => `
         <div class="model-group-title">${esc(name)}<span class="field-key">${esc(m)}</span></div>
         <div class="settings-grid" style="grid-template-columns:1fr">
-          ${keys.map((k) => field(m, k)).join("")}
+          ${keys.map((k) => field(m, k) + modelHint(m, k)).join("")}
         </div>`).join("")}
     </section>`;
   view.innerHTML = `
