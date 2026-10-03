@@ -732,6 +732,12 @@
         "default": true,
         "hint": "用判定模型决定是否沉默、只草草回复、或携带表情包。"
       },
+      "avoid_repeat_openers": {
+        "description": "避免口头禅重复",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后会在提示词里提醒它：别每句都用同一个起手词（如「嗯/哦/行」），也别用「你也是」这类万能应答——质量抽样发现连着好几轮都用「嗯。」起手会显得机械。关闭则不加这条要求。"
+      },
       "provider_id": {
         "description": "判定模型",
         "type": "string",
