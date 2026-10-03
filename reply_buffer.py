@@ -24,7 +24,9 @@ from .log import get_logger
 
 logger = get_logger("发送缓冲")
 
-_SENTENCE_SPLIT = re.compile(r"([。！？!?\n]+)")
+# 断句标点（拆分与合并必须同源；0.221 起集中定义，避免两处漂移）
+_SENTENCE_PUNCT = "。！？!?\n"
+_SENTENCE_SPLIT = re.compile(r"([" + _SENTENCE_PUNCT + r"]+)")
 
 
 def _now_ts() -> float:
@@ -49,7 +51,9 @@ def chunk_text(text: str, *, max_len: int = 46) -> list[str]:
     i = 0
     while i < len(raw_parts):
         seg = raw_parts[i]
-        if i + 1 < len(raw_parts) and re.fullmatch(r"[。？!?\n]+", raw_parts[i + 1]):
+        # 0.221：这里的标点集必须与 _SENTENCE_SPLIT 一致——此前漏了全角「！」，
+        # 导致「…话！下一句」被拆成 [「…话」, 「！」, 「下一句」]：感叹号单独成一条消息（排版很怪）。
+        if i + 1 < len(raw_parts) and re.fullmatch("[" + _SENTENCE_PUNCT + "]+", raw_parts[i + 1]):
             seg += raw_parts[i + 1]
             i += 1
         merged.append(seg.strip())
