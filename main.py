@@ -2302,65 +2302,28 @@ class StorytellerPlugin(Star):
                 except Exception as guard_exc:
                     logger.warning("[Storyteller] 接管索要兜底重生成失败: %s", guard_exc)
                     content = "嗯，在呢。想聊点什么？"
-            # 接管直连回复也被「润色」模块捕获：发送前按模板交给润色模型二次润色与人格校准
-            _polish_ms = 0.0
-            if content:
-                _polish_t0 = time.time()
-                try:
-                    polished = await self.polisher.polish(event, content)
-                    polished = squeeze_reply(polished)  # 0.186：拍平换行/空行，避免 QQ 大空隙
-                    if polished.strip():
-                        content = polished
-                except Exception:
-                    pass
-                _polish_ms = (time.time() - _polish_t0) * 1000
-            # 0.204 思绪留档：把这轮藏起来的半句记进留档（下一轮接着想 / 面板「思绪」可查可删）。
-            # 放在判定之前：即使这轮判定沉默（没说出口），它的思绪也照样留下来——那正是"心里想过的"。
-            try:
-                if _last_inner and mindstream_mod.enabled(self):
-                    _mood = ""
-                    try:
-                        _mood = str(self.presence_store.load(with_decay=False).get("mood") or "")[:20]
-                    except Exception:
-                        pass
-                    _item = self.mind_store.add_inner(
-                        {
-                            "session": session_id,
-                            "user": str(getattr(event, "message_str", "") or ""),
-                            "visible": content,
-                            "inner": _last_inner,
-                            "mood": _mood,
-                        },
-                        limit=mindstream_mod.keep_limit(self),
-                    )
-                    logger.info(
-                        "[Storyteller] 思绪留档: %s（%s 字）%s",
-                        (_item or {}).get("id", "?"), len(_last_inner), _last_inner[:40].replace("\n", " "),
-                    )
-                    # 留档按配置裁剪（降低 keep 时立即生效）
-                    try:
-                        self.mind_store.prune_inner(mindstream_mod.keep_limit(self))
-                    except Exception:
-                        pass
-            except Exception as exc:
-                logger.warning("[Storyteller] 思绪留档失败（不影响回复）: %s", exc)
-            # 0.204 记账：**只要这轮回注过就记账**（与"这轮有没有写思绪"无关，否则去重会失效）
-            try:
-                if _inner_picked:
-                    _used = self._inner_injected.setdefault(session_id, set())
-                    if len(_used) > 60:
-                        _used.clear()
-                    _used.update(str(x.get("id") or "") for x in _inner_picked if x.get("id"))
-            except Exception as exc:
-                logger.warning("[Storyteller] 思绪回注记账失败: %s", exc)
-            # 0.195：回复判定（沉默/草草回复）——接管直连此前绕过判定，导致「每条消息都必回」；
-            # 这里补上：判定模型认为此刻不该接话（敷衍收尾/话题自然结束/重复道别）时就不发。
-            # 保险：连续沉默不超过 silence_streak_limit 次（防止误判导致一直不理人）。
-            # 0.207：判定与表情包判定**并行**（两者都只依赖生成结果、互不依赖）→ 省一次模型往返
+            # 0.208：**润色 + 回复判定 + 表情包判定三者并行**——它们都只依赖刚生成的内容、互不依赖。
+            # 串行时用户要等三段之和（真链实测润色 1~2s + 判定 0.8s + 表情 0.7s ≈ 3s），并行后只等最慢那段。
+            # 关掉 rewrite.parallel_with_checks 则退回旧行为：先串行润色，再并行判定+表情包。
             _emoji_mark = ""
             _judge_ms = 0.0
+            _polish_ms = 0.0
+            _parallel_polish = self.config.bool("rewrite.parallel_with_checks", True)
+            if content and not _parallel_polish:
+                _polish_t0 = time.time()
+                try:
+                    _serial_polished = await self._polish_safe(event, content)
+                    if _serial_polished:
+                        content = _serial_polished
+                except Exception as exc:
+                    logger.warning("[Storyteller] 润色失败（用原文）: %s", exc)
+                _polish_ms = (time.time() - _polish_t0) * 1000
+            _brief_text = ""
             if content:
-                judged, _emoji_mark, _checks_sec = await self._post_checks_parallel(event, content)
+                # 0.207/0.208：判定（沉默/草草回复）+ 表情包 + 润色 一并跑完
+                judged, _emoji_mark, _polished_text, _checks_sec = await self._finalize_parallel(
+                    event, content, with_polish=_parallel_polish
+                )
                 _judge_ms = _checks_sec * 1000
                 if isinstance(judged, dict):
                     action = str(judged.get("action") or "send").strip().lower()
@@ -2373,6 +2336,8 @@ class StorytellerPlugin(Star):
                             "[Storyteller] 判定沉默，本轮不回复: session=%s 连续=%s/%s reason=%s",
                             session_id, streak + 1, limit, reason,
                         )
+                        # 沉默也要留档：没说出口的正是"心里想过的"
+                        self._save_inner_archive(session_id, event, content, _last_inner, _inner_picked)
                         self._record_sent(
                             mode="接管改换", event=event, system_prompt=final_system, prompt=prompt,
                             blocked=True, note=f"判定沉默（{reason}）",
@@ -2383,10 +2348,15 @@ class StorytellerPlugin(Star):
                         logger.info("[Storyteller] 连续沉默达上限（%s），强制回复一次: session=%s", limit, session_id)
                     self._silence_streak[session_id] = 0
                     if action == "brief":
-                        brief = str(judged.get("text") or "").strip()
-                        if brief:
-                            content = brief
-                            logger.info("[Storyteller] 判定草草回复: session=%s text=%s", session_id, brief[:20])
+                        _brief_text = str(judged.get("text") or "").strip()
+                # 文本定稿：草草回复优先用它（那轮只想回一句）；否则用润色结果，润色失败则用原文
+                if _brief_text:
+                    content = _brief_text
+                    logger.info("[Storyteller] 判定草草回复: session=%s text=%s", session_id, _brief_text[:20])
+                elif _polished_text:
+                    content = _polished_text
+            # 0.204 思绪留档：用**最终要发出去的文本**留档（判定改成短句时记那句短的）
+            self._save_inner_archive(session_id, event, content, _last_inner, _inner_picked)
             # 表情包标记：贴在最终文字末尾（判定把它改成短句时标记也不丢）
             if content and _emoji_mark and _emoji_mark not in content:
                 content = f"{content} {_emoji_mark}"
@@ -2503,6 +2473,105 @@ class StorytellerPlugin(Star):
             return bool(self.config.bool("capabilities.suppress_regex_fallback", True))
         except Exception:
             return False
+
+    async def _finalize_parallel(
+        self, event: AstrMessageEvent, content: str, *, with_polish: bool = True
+    ) -> tuple[dict[str, Any] | None, str, str, float]:
+        """并行执行「润色」「回复判定」「表情包判定」（0.208）。
+
+        这三件事都只依赖刚生成的内容、彼此不依赖。串行时用户要等三段之和
+        （真链实测润色 1~2s + 判定 0.8s + 表情 0.7s ≈ 3s）；并行后只等最慢的那段。
+
+        返回 (判定结果, 表情标记, 润色后文本（失败为空串）, 并行耗时秒)。
+        任一路失败都不影响其他两路。
+        """
+        started = time.time()
+        tasks: dict[str, Any] = {}
+        if with_polish and content:
+            tasks["polish"] = asyncio.ensure_future(self._polish_safe(event, content))
+        if self.config.bool("pipeline.takeover_judge_enabled", True) and not caps_done(event):
+            tasks["judge"] = asyncio.ensure_future(self._judge_safe(event, content))
+        if "emoji_send" not in caps_done(event):
+            tasks["emoji"] = asyncio.ensure_future(self._emoji_pick_safe(event, content))
+
+        judged: dict[str, Any] | None = None
+        mark = ""
+        polished = ""
+        if "judge" in tasks:
+            try:
+                judged = await tasks["judge"]
+            except Exception as exc:
+                logger.warning("[Storyteller] 回复判定失败（按正常回复）: %s", exc)
+                judged = None
+        if "emoji" in tasks:
+            try:
+                mark = await tasks["emoji"]
+            except Exception as exc:
+                logger.warning("[Storyteller] 表情包判定失败（跳过）: %s", exc)
+                mark = ""
+        if "polish" in tasks:
+            try:
+                polished = await tasks["polish"]
+            except Exception as exc:
+                logger.warning("[Storyteller] 润色失败（用原文）: %s", exc)
+                polished = ""
+        return judged, mark, polished, time.time() - started
+
+    async def _polish_safe(self, event: AstrMessageEvent, content: str) -> str:
+        """按模板润色一次；空结果视为失败（调用方会用原文）。"""
+        polished = await self.polisher.polish(event, content)
+        polished = squeeze_reply(polished)  # 0.186：拍平换行/空行，避免 QQ 大空隙
+        return polished if str(polished or "").strip() else ""
+
+    def _save_inner_archive(
+        self,
+        session_id: str,
+        event: AstrMessageEvent,
+        visible: str,
+        inner: str,
+        picked: list | None = None,
+    ) -> None:
+        """把这一轮"没说出口的半句"记进留档（0.204），并给已回注的条目记账。
+
+        `visible` 传**最终要发出去的文本**（判定草草回复时就是那句短的）——
+        留档要能回答"我当时想说什么、又藏了什么"。判定沉默时也要调用：那正是"心里想过的"。
+        """
+        try:
+            if inner and mindstream_mod.enabled(self):
+                _mood = ""
+                try:
+                    _mood = str(self.presence_store.load(with_decay=False).get("mood") or "")[:20]
+                except Exception:
+                    pass
+                item = self.mind_store.add_inner(
+                    {
+                        "session": session_id,
+                        "user": str(getattr(event, "message_str", "") or ""),
+                        "visible": str(visible or ""),
+                        "inner": inner,
+                        "mood": _mood,
+                    },
+                    limit=mindstream_mod.keep_limit(self),
+                )
+                logger.info(
+                    "[Storyteller] 思绪留档: %s（%s 字）%s",
+                    (item or {}).get("id", "?"), len(inner), inner[:40].replace("\n", " "),
+                )
+                try:
+                    self.mind_store.prune_inner(mindstream_mod.keep_limit(self))
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.warning("[Storyteller] 思绪留档失败（不影响回复）: %s", exc)
+        # 记账：只要这轮回注过就记账（与"这轮有没有写思绪"无关，否则去重会失效）
+        try:
+            if picked:
+                used = self._inner_injected.setdefault(session_id, set())
+                if len(used) > 60:
+                    used.clear()
+                used.update(str(x.get("id") or "") for x in picked if x.get("id"))
+        except Exception as exc:
+            logger.warning("[Storyteller] 思绪回注记账失败: %s", exc)
 
     async def _post_checks_parallel(
         self, event: AstrMessageEvent, content: str

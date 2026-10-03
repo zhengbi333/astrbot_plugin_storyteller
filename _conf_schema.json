@@ -442,6 +442,12 @@
         "default": true,
         "hint": "开启后，捕获 LLM 回复（接管直连/走主链/放行）并交给润色模型按模板二次润色与人格校准；失败/驳回时用原回复。"
       },
+      "parallel_with_checks": {
+        "description": "润色与判定并行",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，「润色」「回复判定」「表情包判定」三件事同时进行（它们都只依赖刚生成的内容）——用户只需等最慢的那一段，比串行快 1~2 秒。关闭则先润色、再判定（旧行为，便于对照）。"
+      },
       "rewrite_user_enabled": {
         "description": "放行时润色用户消息",
         "type": "bool",
