@@ -5024,6 +5024,11 @@ async function renderOverview() {
   const memoryTotal = tkMemory ? Number((((tkMemory).total || {}).sum) || 0) : null;
   // 模型链预警（0.147）：回退模型与接管模型均为空 & 默认接管改换 → 提示用户配置
   const cfgV = state.configValues || {};
+  // 0.215：模块关掉时，页面上的状态/日程是"最后一次记录"而非实时——如实标注，避免误读
+  // 只有**明确关闭**（enabled === false）才提示；配置未加载（undefined）时不误报
+  const presenceOn = (cfgV.presence || {}).enabled;
+  const scheduleOn = (cfgV.schedule || {}).enabled;
+  const staleNote = (on) => (on === false ? '<span class="hint" style="opacity:.7">模块已关闭 · 以下是最后一次记录</span>' : "");
   const fbId = String((cfgV.models || {}).fallback_provider_id || "").trim();
   const tkId = String((cfgV.intercept || {}).provider_id || "").trim();
   const itcMode = String((cfgV.intercept || {}).mode || "接管改换");
@@ -5064,7 +5069,7 @@ async function renderOverview() {
     </div>
     <div class="overview-grid">
       <section class="panel overview-card">
-        <div class="panel-head"><h3 class="panel-title">Bot 当前状态</h3>${moodText ? `<span class="hint">${esc(moodText)}</span>` : ""}</div>
+        <div class="panel-head"><h3 class="panel-title">Bot 当前状态</h3>${moodText ? `<span class="hint">${esc(moodText)}</span>` : ""}${staleNote(presenceOn)}</div>
         ${pv ? `
           <div class="field">
             <div class="field-row"><div class="field-title">调子</div><div class="hint">${pctTone(pv.tone)}%</div></div>
@@ -5078,7 +5083,7 @@ async function renderOverview() {
             <div class="field-row"><div class="field-title">电量</div><div class="hint">${pctBattery(pv.battery)}%</div></div>
             <div class="progress"><div class="progress-fill" style="width:${pctBattery(pv.battery)}%"></div></div>
           </div>
-          ${activity ? `<div class="hint" style="margin-top:8px">此刻在做：${esc(activity)}</div>` : ""}
+          ${activity ? `<div class="hint" style="margin-top:8px">此刻在做：${esc(activity)} ${staleNote(scheduleOn)}</div>` : ""}
         ` : '<div class="hint">状态数据暂不可用。</div>'}
       </section>
       <section class="panel overview-card">
