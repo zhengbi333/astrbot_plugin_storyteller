@@ -60,6 +60,11 @@ def parse_smart_judge(raw: str) -> dict[str, Any] | None:
         return None
 
 
+# 0.223：按会话缓冲的容量兜底。正常路径都会到期释放（含异常路径，已实测），
+# 这里只防「极端残留」（例如 timer 创建失败），避免长期运行 / 多群场景下无限累积。
+_MAX_SESSIONS = 200
+
+
 class DebounceManager:
     """防抖管理器：会话缓冲、计时与结算（支持智能判断模式）。
 
@@ -368,6 +373,46 @@ class DebounceManager:
             pass
         return False
 
+    def _prune_sessions(self, *, keep: str = "") -> int:
+        """容量兜底：会话数达到上限时释放最久未活动的会话（不碰 keep 指向的那个）。
+
+        释放动作与其它清理点一致：取消计时器、唤醒等待、清空缓冲内容。
+        正常情况返回 0（一切都会到期释放），只有异常残留时才会真的动手。
+        """
+        try:
+            overflow = len(self._sessions) - (_MAX_SESSIONS - 1)
+            if overflow <= 0:
+                return 0
+            victims = [k for k in self._sessions if k != keep][:overflow]
+            for key in victims:
+                session = self._sessions.pop(key, None)
+                if not session:
+                    continue
+                timer = session.get("timer")
+                if timer is not None and not getattr(timer, "done", lambda: True)():
+                    try:
+                        timer.cancel()
+                    except Exception:
+                        pass
+                flush_event = session.get("flush_event")
+                if flush_event is not None:
+                    try:
+                        flush_event.set()
+                    except Exception:
+                        pass
+                for field in ("buffer", "images", "retained", "segments", "items"):
+                    if field in session:
+                        session[field] = []
+            if victims:
+                logger.warning(
+                    "[防抖] 会话数达上限（%s），已释放最久未活动的 %s 个会话（防御性兜底）",
+                    _MAX_SESSIONS, len(victims),
+                )
+            return len(victims)
+        except Exception as exc:
+            logger.warning("[防抖] 会话容量清理异常（忽略）: %s", exc)
+            return 0
+
     async def handle(self, event: Any) -> bool:
         """处理一条消息：返回 True 表示已被防抖接管（静默），False 表示放行。
 
@@ -509,6 +554,8 @@ class DebounceManager:
                 "short_streak": 1 if text and len(text.strip()) <= 10 else 0,
                 "smart": smart_state,
             }
+            # 0.223：容量兜底——超过上限时先释放「最久未活动」的会话（按插入顺序取最旧）
+            self._prune_sessions(keep=uid)
             self._sessions[uid] = session
             if self._smart_enabled():
                 logger.info("收集(首条): session=%s -> 触发智能判断（初始判定）", uid)
