@@ -223,6 +223,7 @@ class StorytellerPlugin(Star):
         self._native_tools_unsupported = False     # 0.200：提供方拒绝原生工具时置位 → 自动恢复正则兜底
         self._cap_log: list[dict] = []             # 0.201：能力调用日志（面板「能力清单」观测用）
         self._inner_injected: dict[str, set] = {}  # 0.204：思绪已回注的 id（同一条不反复回注）
+        self._my_recent_replies: dict[str, list[str]] = {}  # 0.211：我最近说出口的几句话（口头禅检查用）
         try:
             self._migrate_intercept_template()
         except Exception:
@@ -1603,6 +1604,65 @@ class StorytellerPlugin(Star):
         except Exception:
             return fallback
 
+    def _note_my_reply(self, session_id: str, content: str, keep: int = 6) -> None:
+        """记下"我最近说出口的几句话"（0.211），供下一轮检查口头禅。
+
+        只留最近 keep 条、只在本进程内（重启后重新积累即可——口癖检查只看最近几轮）。
+        """
+        try:
+            text = str(content or "").strip()
+            if not text or not session_id:
+                return
+            box = self._my_recent_replies.setdefault(str(session_id), [])
+            box.append(text[:60])
+            if len(box) > keep:
+                del box[:-keep]
+        except Exception:
+            pass
+
+    def _opener_of(self, text: str) -> str:
+        """取一句话的起手词（语气词/口头禅），取不到返回空。"""
+        t = str(text or "").strip()
+        if not t:
+            return ""
+        # 允许跳过前置的括号动作/神态（如"（笑）好。"→ 起手词是"好"）
+        m = re.match(
+            r"^(?:[（(【\[][^）)】\]]{0,12}[）)】\]]\s*)*([嗯哦噢唔呃哎唉行好嗨哟]|那个|就是|其实|然后)",
+            t,
+        )
+        return m.group(1) if m else ""
+
+    def _opener_nudge(self, session_id: str) -> str:
+        """0.211：最近几条老用同一个起手词时，**点名**提醒这轮换一个。
+
+        第 7 轮加的是通用提醒（"别每句都用同一个起手词"），A/B 实测把语气词起手率从 69% 降到 38%；
+        这里再进一步：直接告诉它"你最近三条里有两条以「嗯」开头"——比泛泛的要求更有效。
+        返回空串表示无需提醒（最近说得太少或没有重复）。
+        """
+        try:
+            if not self.config.bool("pipeline.opener_nudge_enabled", True):
+                return ""
+            box = list(self._my_recent_replies.get(str(session_id), []))
+            if len(box) < 2:
+                return ""
+            recent = box[-3:]
+            openers = [self._opener_of(x) for x in recent]
+            openers = [x for x in openers if x]
+            if not openers:
+                return ""
+            counts: dict[str, int] = {}
+            for word in openers:
+                counts[word] = counts.get(word, 0) + 1
+            word, hits = max(counts.items(), key=lambda kv: kv[1])
+            if hits < 2:
+                return ""
+            return (
+                f"\n\n（提醒：你最近几条里有 {hits} 条是拿「{word}」开头的——这一轮换个起手方式就行，"
+                "话还是照你平时的长短说，不用因此多说。）"
+            )
+        except Exception:
+            return ""
+
     async def _archive_bot_reply_to_history(self, session_id: str, user_text: str, content: str) -> None:
         """接管改换：把本轮「用户消息 + Bot 回复」写进 AstrBot 会话历史（官方通道）。
 
@@ -2105,6 +2165,13 @@ class StorytellerPlugin(Star):
                     )
             except Exception:
                 pass
+            # 0.211：口头禅点名——最近几条老用同一个起手词时，直接说清是哪个词
+            try:
+                _nudge = self._opener_nudge(session_id)
+                if _nudge:
+                    final_system += _nudge
+            except Exception:
+                pass
             # 0.197：能力声明段（接管直连不带 tools，改为告诉模型"你能做什么 + 用 [DO:能力]{json} 表达意愿"）
             # 0.206：原生工具已生效时只给一句提示（工具清单随请求一起发过去；完整清单曾占 system 的 55%）
             try:
@@ -2423,6 +2490,8 @@ class StorytellerPlugin(Star):
                         parts = buffer.submit(session_id, content)
                         sent_ok = parts > 0
                         if sent_ok:
+                            # 0.211：记下这句（下一轮检查口头禅用）
+                            self._note_my_reply(session_id, content)
                             logger.info(
                                 "[Storyteller] 接管改换: 回复入发送缓冲 session=%s 条数=%s",
                                 session_id, parts,
@@ -2437,6 +2506,8 @@ class StorytellerPlugin(Star):
                             if result is False:
                                 raise RuntimeError("发送接口返回失败")
                             sent_ok = True
+                            # 0.211：记下这句（下一轮检查口头禅用）
+                            self._note_my_reply(session_id, content)
                             # 接管绕过主链：把 Bot 回复回填记忆插件时间线，
                             # 否则记忆插件 on_llm_response 记录不到（时间线缺 Bot 侧）
                             self._note_bot_reply(event, content)
