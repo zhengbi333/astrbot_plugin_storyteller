@@ -1374,9 +1374,14 @@ class StorytellerWebApi:
                 return True, "未启用穿搭（衣柜未初始化）"
             items = 0
             try:
+                # 0.228 修正：真实结构是 data["closet"]（单数、列表），此前我按 data["closets"]（复数、字典）
+                # 读 → 永远算成 0 件（报了 OK 但数字是错的）。自检项的数字必须与真实数据一致。
                 data = store.load() or {}
-                for value in (data.get("closets") or {}).values():
-                    items += len(value or [])
+                closet = data.get("closet")
+                if isinstance(closet, list):
+                    items = len(closet)
+                elif isinstance(closet, dict):
+                    items = sum(len(v or []) for v in closet.values())
             except Exception as exc:
                 return False, "衣柜数据读取失败：" + type(exc).__name__
             if not enabled:

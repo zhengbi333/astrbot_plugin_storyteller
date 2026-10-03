@@ -174,6 +174,11 @@ class WardrobeStore:
         return self.load()
 
     def set_outfit(self, items: list[str], note: str = "") -> dict[str, Any]:
+        # 0.228：字符串容错（与能力层 _impl_outfit_change 的处理保持一致）。
+        # 否则误传一个字符串会按可迭代逐字拆成 items（["黑","色","机",...]），
+        # 生成一份看着像样、其实全是单字的穿搭数据。
+        if isinstance(items, str):
+            items = [x.strip() for x in items.replace("、", ",").replace("，", ",").split(",") if x.strip()]
         self._data["outfit"] = {
             "items": [str(x).strip()[:60] for x in (items or []) if str(x).strip()][:8],
             "note": (note or "").strip()[:200],
