@@ -3571,9 +3571,11 @@ class StorytellerPlugin(Star):
         place = self._place_label(event)
         custom = str(self.config.get("identity.custom_text", "") or "").strip()
         if custom:
-            from .intercept import replace_template
-
-            return replace_template(custom, {"current_user": user, "place": place})
+            # 0.224：只替换文档承诺支持的 {当前用户}/{场合}。
+            # 此前用的是 replace_template（会遍历**全部**占位符），于是用户在这段文本里写别的占位符
+            # （如 {人格}/{记忆}）会被**静默清空**成空串——那等于偷偷改用户写的内容。
+            # 现在改成定点替换：不支持的占位符原样保留，用户一眼能看出"这个不支持"。
+            return custom.replace("{当前用户}", user).replace("{场合}", place)
         try:
             anchor = build_identity_anchor(event, memory_name=self._memory_name(event), current_user=user, place=place)
         except Exception:

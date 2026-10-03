@@ -1239,7 +1239,7 @@ async function renderIdentity() {
     <section class="section">
       <div class="section-head">
         <h2 class="section-title">防认错提醒</h2>
-        <p class="section-desc">提醒 LLM：提示词里已含当前对话、记忆与上下文，注意区分「当前和你对话的人」（{当前用户}、{场合}、{身份}），别张冠李戴。</p>
+        <p class="section-desc">提醒 LLM：提示词里已含当前对话、记忆与上下文，注意区分「当前和你对话的人」，别张冠李戴。下方自定义框里可用 <b>{当前用户}</b>（对方称呼/ID）与 <b>{场合}</b>（私聊/群聊）两个占位符；其它占位符这里的<b>不支持</b>，写了会原样保留（不会替换）。</p>
       </div>
       <div class="hint" style="white-space:pre-wrap">判定规则：
 · 人物基于当前会话判定（发送者 ID + 会话键），不是从记忆里猜的；
