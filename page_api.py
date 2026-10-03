@@ -1269,9 +1269,11 @@ class StorytellerWebApi:
         # ---- 0.216：补齐此前没有自检项的模块（清障页漏检 = 用户会误以为"全绿就都正常"）----
         def intercept_status() -> tuple[bool, str]:
             """拦截链路：模式 + 模板能否正常渲染（坏模板会被回退，这里提前暴露）。"""
-            from .intercept import DEFAULT_TEMPLATE, TEMPLATE_PLACEHOLDERS, replace_template
+            from .intercept import DEFAULT_TEMPLATE, TEMPLATE_PLACEHOLDERS, replace_template, resolve_mode
 
-            mode = str(plugin.config.get("intercept.mode", "接管改换") or "接管改换").strip()
+            # 0.220：用 resolve_mode 与真实链路同源（此前这里默认写"接管改换"，
+            # 而 schema 与主链默认是"接管走主链"——配置缺键时自检会显示错误模式）
+            mode = resolve_mode(plugin.config.get("intercept.mode"))
             raw = str(plugin.config.get("intercept.template", "") or "").strip()
             template = raw or DEFAULT_TEMPLATE
             values = {k: "<" + k + ">" for k in TEMPLATE_PLACEHOLDERS}

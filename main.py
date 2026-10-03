@@ -637,11 +637,14 @@ class StorytellerPlugin(Star):
                             await self._write_commitment(event, text)
                     except Exception as exc:
                         logger.warning("[Storyteller] 记忆写入同步兜底异常: %s", exc)
-                self._sync_memory_managed(False)  # 直连回复记忆由 compose_injection 注入模板；主链被阻断
-                await self._takeover_reply(event, req, text, prompt, system_prompt)
-                return
-            if mode == MODE_TAKEOVER_MAINCHAIN:
-                self._sync_memory_managed(True)  # 改写主链请求并放行：模板含 compose 记忆，避免记忆插件双份注入
+                # 0.220 修复：这里原本**无条件**走 _takeover_reply，导致下面的「接管走主链」分支永远到不了
+                # （死代码）——所有选了「接管走主链」的用户（含 schema 默认值）实际都跑成了「接管改换」。
+                if mode == MODE_TAKEOVER:
+                    self._sync_memory_managed(False)  # 直连回复记忆由 compose_injection 注入模板；主链被阻断
+                    await self._takeover_reply(event, req, text, prompt, system_prompt)
+                    return
+                # 接管走主链：把模板写进主链请求并放行，回复走主链管线（记忆/润色/表情包/会话历史自动生效），用主链默认模型
+                self._sync_memory_managed(True)  # 主链请求已含本插件组装的记忆，避免记忆插件再注入一份
                 await self._takeover_via_mainchain(event, req, text, prompt, system_prompt)
                 return
             # ---- 放行模式：组装拟人化锚 + 润色/识图 + 托管记忆，交主链回复 ----
@@ -771,9 +774,11 @@ class StorytellerPlugin(Star):
                 logger.warning("[Storyteller] 接管失败（静默策略）: %s", reason)
                 return
             # 默认「放行主链」：不阻断、不直发，交主链原样回复（至少 Bot 有回应）
+            # 0.220：这里此前记成 blocked=True，但实际**没有阻断**（只是降级放行）——
+            # 「拦＆改」页会把它显示成"被阻断"，与实际不符。改为 False 并写明"未阻断"。
             self._record_sent(
                 mode="接管改换", event=event, system_prompt=system_prompt, prompt=prompt,
-                blocked=True, note=f"接管失败（{reason}），已降级放行主链",
+                blocked=False, note=f"接管失败（{reason}），已降级放行主链（未阻断）",
             )
             logger.warning("[Storyteller] 接管失败，已降级放行主链: %s", reason)
         except Exception as exc:
