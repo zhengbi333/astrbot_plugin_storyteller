@@ -159,6 +159,27 @@ def _query(key: str, default: Any = None) -> Any:
         return default
 
 
+_SENSITIVE_KEY_HINTS = ("key", "token", "secret", "password", "passwd", "credential")
+
+
+def _mask_config_values(values: Any) -> Any:
+    """日志脱敏（0.233）：凭据类字段只保留「已设置/未设置」，绝不把明文写进日志。
+
+    背景：保存配置的日志此前直接打印整段模块配置——用户保存生图配置（含 `api_api_key`）时，
+    **密钥被明文写进 storyteller.log**（实测日志里确有这样的行）。用户把日志贴出去求助就会泄漏。
+    """
+    if not isinstance(values, dict):
+        return values
+    out: dict[str, Any] = {}
+    for key, value in values.items():
+        if any(hint in str(key).lower() for hint in _SENSITIVE_KEY_HINTS):
+            text = str(value or "")
+            out[key] = f"<已设置 {len(text)} 字符>" if text else "<未设置>"
+        else:
+            out[key] = value
+    return out
+
+
 class StorytellerWebApi:
     """面板后端接口：健康状态与外观控制。"""
 
@@ -440,7 +461,8 @@ class StorytellerWebApi:
             return await _fail(f"保存配置失败: {exc}")
         self._plugin.raw_config = raw
         self._plugin.config = ConfigView(raw)
-        logger.info("[Storyteller] 配置已保存: module=%s values=%s", module, current)
+        logger.info("[Storyteller] 配置已保存: module=%s values=%s", module,
+                        _mask_config_values(current))  # 0.233：凭据类字段脱敏后再写日志
         return await _ok(
             {"ok": True, "values": self.config_values(schema).get(module, {})}
         )
