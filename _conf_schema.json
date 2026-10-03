@@ -118,6 +118,50 @@
       }
     }
   },
+  "silence": {
+    "description": "智能沉默",
+    "type": "object",
+    "hint": "让它可以不回话：判定模型看过这条回复后，决定正常发 / 只草草回一句 / 干脆沉默（沉默会留档为没说出口的心里话）。连续沉默有上限保护，不会一直不理人。",
+    "items": {
+      "enabled": {
+        "description": "启用智能沉默",
+        "type": "bool",
+        "default": true,
+        "hint": "总开关。关闭后每条消息都会回复（不再做沉默/草草回复判定）。"
+      },
+      "provider_id": {
+        "description": "判定模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "沉默/草草回复判定专用（独立名额，不再借用表情包判定模型）。留空按「留空回退模型」策略解析。"
+      },
+      "silence_streak_limit": {
+        "description": "连续沉默上限(次)",
+        "type": "int",
+        "default": 2,
+        "hint": "最多允许连续沉默几次；达到上限后强制回复一次，防止判定误伤导致一直不理人。0 = 永不主动沉默。（取值 0~10）"
+      },
+      "brief_enabled": {
+        "description": "允许草草回复",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，遇到「无语/困惑」的场面可以只回「？」「…？」；关闭则一律正常回复。"
+      },
+      "context_enabled": {
+        "description": "判定时附带时间与日程",
+        "type": "bool",
+        "default": true,
+        "hint": "把「此刻时间 + 她此刻在做什么」一并交给判定模型——否则它看不到日程，就判不出「这会儿她在睡，可以不回」。"
+      },
+      "night_silence": {
+        "description": "睡觉/深夜可以沉默",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，若她正在睡觉（日程里含「睡」）或状态明显是深夜困倦，而对方只是「在吗」这类没有实质内容的搭话，判沉默更自然。"
+      }
+    }
+  },
   "debounce": {
     "description": "消息防抖",
     "type": "object",
@@ -970,6 +1014,13 @@
         "type": "float",
         "default": 0.15,
         "hint": "好感度回落的最低值（不会更低了）——保留一点基本的温度，避免陌生人化到冰点。"
+      },
+      "provider_id": {
+        "description": "关系判断模型",
+        "type": "string",
+        "role": "provider",
+        "default": "",
+        "hint": "攒满「触发条数」条互动后，由它提炼最近印象并微调好感度。0.234 起独立成名额（此前与沉默判定共用同一个键）；留空按「留空回退模型」策略解析。"
       }
     }
   },

@@ -8,6 +8,7 @@ const NAV = [
   { key: "image", label: "生图" },
   { key: "appearance", label: "外观" },
   { key: "intercept", label: "拦＆改" },
+  { key: "silence", label: "沉默" },
   { key: "send", label: "发送" },
   { key: "rewrite", label: "润色" },
   { key: "debounce", label: "防抖" },
@@ -36,6 +37,7 @@ const TITLES = {
   image: ["生图", "对话里说「画一张…」即可触发；独立 API 或 AstrBot 卡片渲染"],
   appearance: ["外观", "配色主题、明暗模式与背景效果"],
   intercept: ["拦＆改", "主链 LLM 请求介入方式、最终发送模板与最近发送内容"],
+  silence: ["智能沉默", "判定为不想回 / 不合适时可以沉默不回（沉默 / 草草回复 / 正常发送）"],
   rewrite: ["润色", "回复捕获后按模板二次润色与人格校准"],
   debounce: ["消息防抖", "连续消息合并状态"],
   identity: ["防认错", "区分当前对话对象，别搞混人称"],
@@ -685,6 +687,7 @@ async function render() {
     if (state.current === "appearance") renderAppearance();
     // 异步数据加载不阻塞切换动画：同步部分先填充占位，数据回来后再填充内容
     if (state.current === "intercept") renderIntercept().catch((err) => diagLog(`拦＆改页异常: ${err.message}`));
+    if (state.current === "silence") renderSilence().catch((err) => diagLog(`沉默页异常: ${err.message}`));
     if (state.current === "rewrite") renderRewrite().catch((err) => diagLog(`润色页异常: ${err.message}`));
     if (state.current === "debounce") renderDebounce().catch((err) => diagLog(`防抖页异常: ${err.message}`));
     if (state.current === "identity") renderIdentity().catch((err) => diagLog(`身份页异常: ${err.message}`));
@@ -785,6 +788,174 @@ function bindSettingsIn(container) {
         saveConfigValue(module, key, node.value);
       });
     }
+  });
+}
+
+/* ---------------------------------------------------------------- 智能沉默 */
+/* 沉默页（0.234 起独立成模块，与「拦＆改」相邻）：
+   判定模型看过这条回复后，决定「正常发 / 只草草回一句 / 干脆沉默」。
+   本页管它的开关、判定模型、连续沉默上限与判定情境，并展示本次运行内的沉默记录。 */
+async function renderSilence() {
+  const view = $("#view");
+  view.innerHTML = `<div class="loading">加载沉默…</div>`;
+  let schemaData;
+  try {
+    schemaData = await apiGet("config/schema");
+  } catch (err) {
+    if (state.current === "silence") {
+      view.innerHTML = `<div class="section"><p class="section-desc">加载失败：${esc(err.message)}</p></div>`;
+    }
+    return;
+  }
+  if (state.current !== "silence") return;
+  const schema = schemaData.schema || {};
+  const values = schemaData.values || {};
+  const slSchema = (schema.silence && schema.silence.items) || {};
+  const slValues = values.silence || {};
+  const field = (key) => renderSettingField("silence", key, slSchema[key] || {}, slValues[key]);
+  const masterItem = slSchema.enabled || { description: "启用智能沉默", type: "bool", default: true, hint: "" };
+  const restKeys = Object.keys(slSchema).filter((k) => k !== "enabled");
+  const restHtml = sortSettingEntries(restKeys.map((k) => [k, slSchema[k]])).map(([k]) => field(k)).join("");
+  view.innerHTML = `
+    ${placeholderHintCard("silence")}
+    <div class="silence-layout">
+      <div class="silence-left">
+        <section class="panel">
+          <div class="panel-head">
+            <h3 class="panel-title">判定状态</h3>
+            <button class="btn" id="sl-refresh">刷新</button>
+          </div>
+          <div id="sl-status">加载中…</div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h3 class="panel-title">最近沉默</h3>
+            <span class="hint">本次运行内 · 最多 20 条</span>
+          </div>
+          <div id="sl-recent">加载中…</div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h3 class="panel-title">连续沉默计数</h3>
+            <button class="btn" id="sl-reset">全部清零</button>
+          </div>
+          <div id="sl-streaks">加载中…</div>
+        </section>
+      </div>
+      <div class="silence-right">
+        <div class="settings-grid">
+          ${masterSwitch("silence-master", masterItem.description || "启用智能沉默", masterItem.hint || "", Boolean(slValues.enabled))}
+          ${restHtml || '<div class="hint">暂无设置项</div>'}
+        </div>
+      </div>
+    </div>
+  `;
+  bindSettingsIn(view);
+  bindMasterSwitch("silence-master", "silence", "enabled");
+  const refreshBtn = document.getElementById("sl-refresh");
+  if (refreshBtn) refreshBtn.addEventListener("click", tickSilence);
+  const resetBtn = document.getElementById("sl-reset");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", async () => {
+      try {
+        await apiPost("silence/reset", {});
+        toast("已清零");
+        tickSilence();
+      } catch (err) {
+        toast(`清零失败：${err.message}`, "err");
+      }
+    });
+  }
+  startPolling("silence", pollIntervalSec() * 3, tickSilence);
+  await tickSilence();
+}
+
+async function tickSilence() {
+  if (state.current !== "silence") return;
+  let data;
+  try {
+    data = await apiGet("silence/status");
+  } catch (err) {
+    return;
+  }
+  if (state.current !== "silence") return;
+  renderSilenceStatus(data);
+  renderSilenceRecent(data);
+  renderSilenceStreaks(data);
+}
+
+function renderSilenceStatus(data) {
+  const node = document.getElementById("sl-status");
+  if (!node) return;
+  const d = data || {};
+  let modelText;
+  if (d.provider_label) {
+    modelText = esc(d.provider_label);
+  } else if (d.provider_invalid) {
+    modelText = "配置的模型在运行时不匹配 → 判定会被驳回（不会沉默）";
+  } else if (d.fallback_available) {
+    modelText = `未配置专属模型 → 走回退模型 ${esc(d.fallback_label || d.fallback_id)}`;
+  } else {
+    modelText = "未配置专属模型、回退模型也为空 → 判定会被驳回（不会沉默）";
+  }
+  const rows = [
+    ["总开关", d.enabled ? "开启" : "关闭（每条消息都会回复）"],
+    ["判定模型", modelText],
+    ["连续沉默上限", d.streak_limit ? `${d.streak_limit} 次` : "0（永不主动沉默）"],
+    ["草草回复", d.brief_enabled ? "允许（仅限「？」这类无语反应）" : "不允许（一律正常回复）"],
+    ["情境注入", d.context_enabled ? "开启（时间 + 日程）" : "关闭"],
+    ["睡觉/深夜可沉默", d.night_silence ? "是" : "否"],
+  ];
+  const preview = d.context_preview
+    ? `<div class="hint" style="white-space:pre-wrap;margin-top:8px">判定模型当前能看到：\n${esc(d.context_preview)}</div>`
+    : '<div class="hint" style="margin-top:8px">情境注入已关闭：判定模型只看到状态锚，判不出「这会儿她在睡」。</div>';
+  node.innerHTML = rows.map(([k, v]) => `
+      <div class="field">
+        <div class="field-title">${esc(k)}</div>
+        <div class="hint">${v}</div>
+      </div>`).join("") + preview;
+}
+
+function renderSilenceRecent(data) {
+  const node = document.getElementById("sl-recent");
+  if (!node) return;
+  const items = (data && data.recent) || [];
+  node.innerHTML = items.length
+    ? items.map((it) => `
+        <div class="field">
+          <div class="field-title">[${esc(it.time)}] ${esc(sessionUser(it.session_id))} · ${esc(it.note || "判定沉默")}</div>
+          <div class="hint">${esc(it.mode || "")}${it.user_name ? ` · ${esc(it.user_name)}` : ""}</div>
+        </div>`).join("")
+    : '<div class="hint">本次运行内还没有沉默记录。判定沉默时，这里会留下"没说出口的那次"（内容也照常留档）。</div>';
+}
+
+function renderSilenceStreaks(data) {
+  const node = document.getElementById("sl-streaks");
+  if (!node) return;
+  const limit = (data && data.streak_limit) || 0;
+  const active = ((data && data.streaks) || []).filter((it) => it.count > 0);
+  node.innerHTML = active.length
+    ? active.map((it) => `
+        <div class="field">
+          <div class="field-row">
+            <div>
+              <div class="field-title">${esc(sessionUser(it.session_id))}</div>
+              <div class="hint">已连续沉默 ${it.count} 次${limit ? ` / 上限 ${limit}（达上限会强制回复一次并清零）` : "（上限 0 = 永不强制回复）"}</div>
+            </div>
+            <button class="btn" data-sl-reset="${esc(it.session_id)}">清零</button>
+          </div>
+        </div>`).join("")
+    : '<div class="hint">各会话的连续沉默计数都是 0。达上限会自动清零并强制回复一次，防止判定误伤导致一直不理人。</div>';
+  node.querySelectorAll("[data-sl-reset]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await apiPost("silence/reset", { session_id: btn.dataset.slReset });
+        toast("已清零");
+        tickSilence();
+      } catch (err) {
+        toast(`清零失败：${err.message}`, "err");
+      }
+    });
   });
 }
 
@@ -1096,21 +1267,20 @@ async function renderRelationships() {
   const cfg = state.configSchema || {};
   const cvals = state.configValues || {};
   const relSchema = (cfg.relationship && cfg.relationship.items) || {};
-  const pipelineItems = (cfg.pipeline && cfg.pipeline.items) || {};
   const relVals = cvals.relationship || {};
   const pct = (a) => Math.max(0, Math.min(100, Math.round((a || 0) * 100)));
   let sel = rels.find((r) => r.user_id === state.relSelected) || rels[0] || null;
   if (sel) state.relSelected = sel.user_id; else state.relSelected = "";
-  // 右栏设置卡（印象配置 + 关系判断模型）
+  // 右栏设置卡（印象配置；回复判定/智能沉默已迁至「沉默」页）
   const batchItem = relSchema.impression_batch || { description: "印象提炼触发条数", type: "int", default: 10, hint: "hint" };
   const intervalItem = relSchema.impression_min_interval || { description: "印象提炼最短间隔(分钟)", type: "int", default: 30, hint: "hint" };
-  const judgeItem = pipelineItems.provider_id || { description: "关系判断模型", type: "string", role: "provider", default: "" };
+  // 0.234：「回复判定 / 智能沉默」已独立成模块，迁到顶部选项卡「沉默」，此处只留指引
+  const judgeItem = relSchema.provider_id || { description: "关系判断模型", type: "string", role: "provider", default: "", hint: "" };
   const rightCards = [
     renderSettingField("relationship", "impression_batch", batchItem, relVals.impression_batch),
     renderSettingField("relationship", "impression_min_interval", intervalItem, relVals.impression_min_interval),
-    renderSettingField("pipeline", "provider_id", judgeItem, (cvals.pipeline || {}).provider_id),
-    renderSettingField("pipeline", "enabled", pipelineItems.enabled || { description: "回复链路总开关", type: "bool", default: true }, (cvals.pipeline || {}).enabled),
-    renderSettingField("pipeline", "judge_enabled", pipelineItems.judge_enabled || { description: "关系判断开关", type: "bool", default: true }, (cvals.pipeline || {}).judge_enabled),
+    renderSettingField("relationship", "provider_id", judgeItem, relVals.provider_id),
+    `<div class="setting-card"><div class="field"><div class="field-title">智能沉默<span class="field-key">silence</span></div><div class="hint">沉默 / 草草回复的开关、判定模型、连续沉默上限与判定情境，已独立成模块，见顶部选项卡「<b>沉默</b>」（0.234 起）。</div></div></div>`,
   ].join("");
   view.innerHTML = `
     ${placeholderHintCard("relationship")}
@@ -1152,7 +1322,7 @@ async function renderRelationships() {
           <div class="panel-head"><h3 class="panel-title">关系设置</h3></div>
           ${masterSwitch("rel-enabled", "关系模型", "Bot 与每个用户的关系，随互动自然演进；总开关关闭则不记录、不注入 {关系}。", await loadModuleEnabled("relationship", "enabled"))}
           <div class="settings-grid" style="grid-template-columns:1fr">${rightCards}</div>
-          <div class="rel-setting-note">关系判断模型：攒满「触发条数」条互动、且距上次提炼超过「最短间隔」时，由它提炼最近印象并微调好感度（原设置页「链路」的判定模型已移入此处）。</div>
+          <div class="rel-setting-note">关系判断模型：攒满「触发条数」条互动、且距上次提炼超过「最短间隔」时，由它提炼最近印象并微调好感度。（0.234 起有独立名额 relationship.provider_id；此前它与「沉默判定」共用同一个键。）</div>
         </section>
       </div>
     </div>
@@ -3785,7 +3955,7 @@ async function renderSettings() {
   // 0.196：troubleshoot 已有专属顶部选项卡「清障」，设置页不再重复展示它
   // 0.197：capabilities 通过 AstrBot 插件配置页/后续能力面板管理，暂不进设置页（避免又一次重复入口）
   // 0.204：mindstream 有专属页「思绪」（主开关与设置都在那儿），设置页同样不重复
-  const EXCLUDED_MODULES = ["identity", "relationship", "voice", "persona", "presence", "schedule", "proactive", "emoji", "wardrobe", "debounce", "intercept", "rewrite", "memory", "vision", "pipeline", "general", "search", "mind", "send", "image", "troubleshoot", "capabilities", "mindstream"];
+  const EXCLUDED_MODULES = ["identity", "relationship", "voice", "persona", "presence", "schedule", "proactive", "emoji", "wardrobe", "debounce", "intercept", "rewrite", "memory", "vision", "pipeline", "silence", "general", "search", "mind", "send", "image", "troubleshoot", "capabilities", "mindstream"];
   const modules = Object.keys(schema).filter((m) => !EXCLUDED_MODULES.includes(m));
   if (!state.settingsModule || !modules.includes(state.settingsModule)) {
     state.settingsModule = modules[0] || "";
@@ -4020,6 +4190,7 @@ function refreshCurrentView() {
     relationship: renderRelationships,
     debounce: renderDebounce,
     intercept: renderIntercept,
+    silence: renderSilence,
     rewrite: renderRewrite,
     models: renderModels,
     image: renderImage,
@@ -4708,7 +4879,8 @@ const MODELS_COLUMNS = [
     groups: [
       ["intercept", "拦＆改", ["provider_id"]],
       ["rewrite", "润色", ["provider_id"]],
-      ["pipeline", "回复判定", ["provider_id"]],
+      ["silence", "沉默判定", ["provider_id"]],
+      ["relationship", "关系判断", ["provider_id"]],
       ["send", "抢话裁决", ["interrupt_judge_provider_id"]],
       ["debounce", "防抖智能判断", ["smart_provider_id"]],
       ["emoji", "表情包判定", ["judge_provider_id"]],

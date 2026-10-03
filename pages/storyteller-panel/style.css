@@ -1141,6 +1141,23 @@ select.input {
   min-width: 0;
 }
 
+/* 沉默页：与防抖页同一套左右分栏（左展示 / 右设置） */
+.silence-layout {
+  display: flex;
+  gap: 22px;
+  align-items: flex-start;
+}
+.silence-left {
+  flex: 0 0 45%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.silence-right {
+  flex: 1;
+  min-width: 0;
+}
+
 /* 设置项卡片（轻区分，不要大黑框） */
 .settings-grid {
   display: grid;
@@ -1309,10 +1326,12 @@ select.input {
 }
 
 @media (max-width: 900px) {
-  .debounce-layout {
+  .debounce-layout,
+  .silence-layout {
     flex-direction: column;
   }
-  .debounce-left {
+  .debounce-left,
+  .silence-left {
     flex: none;
     width: 100%;
   }

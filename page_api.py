@@ -208,6 +208,8 @@ class StorytellerWebApi:
             (f"{prefix}/intercept/user_requests", self.intercept_user_requests, ["GET"], "Storyteller intercepted user requests"),
             (f"{prefix}/intercept/clear", self.intercept_clear, ["POST"], "Storyteller intercept clear"),
             (f"{prefix}/intercept/sent", self.intercept_sent, ["GET"], "Storyteller recently sent LLM requests"),
+            (f"{prefix}/silence/status", self.silence_status, ["GET"], "Storyteller smart silence status"),
+            (f"{prefix}/silence/reset", self.silence_reset, ["POST"], "Storyteller smart silence streak reset"),
             (f"{prefix}/debounce/status", self.debounce_status, ["GET"], "Storyteller debounce status"),
             (f"{prefix}/debounce/history", self.debounce_history, ["GET"], "Storyteller debounce history"),
             (f"{prefix}/debounce/flush", self.debounce_flush, ["POST"], "Storyteller debounce flush session"),
@@ -535,6 +537,81 @@ class StorytellerWebApi:
         except (TypeError, ValueError):
             count = 20
         return await _ok({"items": self._plugin.sent.sent(count)})
+
+    # --------------------------------------------------------- 智能沉默
+    async def silence_status(self) -> Any:
+        """智能沉默状态：开关 / 判定模型 / 上限 / 各会话连续沉默计数 / 最近沉默记录。"""
+        from . import silence as silence_mod
+        from .models import configured_id
+
+        plugin = self._plugin
+        cfg = getattr(plugin, "config", None)
+        # 判定模型：显式配置（含旧键兼容）→ 与运行时同一口径（configured_id 走 FUNCTION_KEYS + 兼容键）
+        explicit = silence_mod.provider_id(cfg)
+        try:
+            resolved_id = configured_id(cfg, "judge")
+        except Exception:
+            resolved_id = explicit
+        provider = self._provider_by_id(resolved_id) if resolved_id else None
+        label = self._provider_label(provider, resolved_id) if provider is not None else ""
+        fallback_id = str(cfg.get("models.fallback_provider_id", "") or "").strip() if cfg is not None else ""
+        fallback_provider = self._provider_by_id(fallback_id) if fallback_id else None
+        # 连续沉默计数（内存态，重启清零）
+        streaks: list[dict[str, Any]] = []
+        try:
+            raw = getattr(plugin, "_silence_streak", {}) or {}
+            if isinstance(raw, dict):
+                streaks = [{"session_id": str(k), "count": int(v or 0)} for k, v in raw.items()]
+                streaks.sort(key=lambda item: item["count"], reverse=True)
+        except Exception:
+            streaks = []
+        # 最近沉默记录（本次运行内的发送缓冲；blocked=True 即"判定沉默、没有发出去"）
+        recent: list[dict[str, Any]] = []
+        try:
+            for item in plugin.sent.sent(50):
+                if item.get("blocked"):
+                    recent.append({
+                        "time": str(item.get("time") or ""),
+                        "session_id": str(item.get("session_id") or ""),
+                        "user_name": str(item.get("user_name") or ""),
+                        "note": str(item.get("note") or ""),
+                        "mode": str(item.get("mode") or ""),
+                    })
+        except Exception:
+            recent = []
+        return await _ok({
+            "enabled": silence_mod.enabled(cfg),
+            "provider_id": resolved_id,
+            "provider_label": label,
+            "provider_explicit": bool(explicit),
+            "provider_invalid": bool(resolved_id) and provider is None,
+            "fallback_id": fallback_id,
+            "fallback_label": self._provider_label(fallback_provider, fallback_id) if fallback_provider else "",
+            "fallback_available": fallback_provider is not None,
+            "streak_limit": silence_mod.streak_limit(cfg),
+            "brief_enabled": silence_mod.brief_enabled(cfg),
+            "context_enabled": silence_mod.context_enabled(cfg),
+            "night_silence": silence_mod.night_silence(cfg),
+            "context_preview": silence_mod.build_context_block(plugin, cfg),
+            "streaks": streaks[:20],
+            "recent": recent[:20],
+        })
+
+    async def silence_reset(self) -> Any:
+        """清零连续沉默计数：带 session_id 只清该会话，不带则清全部。"""
+        body = await _json_body(default={})
+        session_id = str(body.get("session_id") or "").strip()
+        try:
+            raw = getattr(self._plugin, "_silence_streak", None)
+            if not isinstance(raw, dict):
+                return await _fail("沉默计数未初始化")
+            if session_id:
+                raw.pop(session_id, None)
+            else:
+                raw.clear()
+        except Exception as exc:
+            return await _fail(f"重置失败：{type(exc).__name__}")
+        return await _ok({"session_id": session_id, "cleared": True})
 
     # ------------------------------------------------------------- 防抖
 
@@ -1433,7 +1510,22 @@ class StorytellerWebApi:
             native = bool(plugin.config.bool("capabilities.native_tools", True))
             return True, str(total) + " 个能力已注册（原生工具=" + ("开" if native else "关，走文本协议") + "）"
 
+        def silence_gate_status() -> tuple[bool, str]:
+            from . import silence as silence_mod
+
+            if not silence_mod.enabled(plugin.config):
+                return True, "已在配置里关闭（每条消息都会回复）"
+            try:
+                limit = silence_mod.streak_limit(plugin.config)
+            except Exception as exc:
+                return False, "沉默配置读取失败：" + type(exc).__name__
+            if limit <= 0:
+                return True, "连续上限为 0 → 永不主动沉默（判定不会拦下任何回复）"
+            scope = "开启" if silence_mod.context_enabled(plugin.config) else "关闭"
+            return True, f"沉默判定可用（连续上限 {limit} 次；情境注入 {scope}）"
+
         add("intercept", "拦截与模板", "拦截模式与模板能否正常渲染", intercept_status)
+        add("silence", "智能沉默", "沉默判定开关、连续上限与情境注入", silence_gate_status)
         add("debounce", "消息防抖", "防抖开启时合并器是否就位", debounce_status)
         add("rewrite", "润色", "润色开关与模板是否配套", rewrite_status)
         add("image", "生图", "生图后端与模型配置是否齐备", image_status)
@@ -1619,7 +1711,8 @@ class StorytellerWebApi:
             ("diary", "mind.diary_provider_id"), ("search", "search.provider_id"),
         ]),
         ("proactive", "主动", [("proactive", "proactive.provider_id")]),
-        ("relationship", "关系", [("judge", "pipeline.provider_id")]),
+        ("silence", "沉默", [("judge", "silence.provider_id")]),
+        ("relationship", "关系", [("relation_judge", "relationship.provider_id")]),
         ("debounce", "防抖", [("smart_judge", "debounce.smart_provider_id")]),
         ("intercept", "拦＆改", [("takeover", "intercept.provider_id")]),
         ("rewrite", "润色", [("rewrite", "rewrite.provider_id")]),

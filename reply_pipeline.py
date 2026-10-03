@@ -80,20 +80,34 @@ def build_rewrite_prompt(original: str, user_text: str, presence: str, profile: 
     return "\n".join(lines)
 
 
-def build_judge_prompt(rewritten: str, user_text: str, presence: str, categories: list[str]) -> str:
-    """智能判定：沉默 / 草草回复 / 表情包 / 正常发送。"""
+def build_judge_prompt(
+    rewritten: str,
+    user_text: str,
+    presence: str,
+    categories: list[str],
+    *,
+    extra: str = "",
+    brief_enabled: bool = True,
+    night_silence: bool = True,
+) -> str:
+    """智能沉默判定：沉默 / 草草回复 / 表情包 / 正常发送。
+
+    extra：「当前情境」（此刻时间 + 她此刻在做什么），由 silence 模块组装——
+    没有它，判定模型看不到日程，就永远判不出「这会儿她在睡，可以不回」。
+    """
+    from .silence import build_rules_text
+
     cat_hint = "、".join(f"「{c}」" for c in categories) if categories else "（尚未配置任何分类）"
     lines = [
         "下面是机器人准备好的一条回复。请判断它最终应该怎么发出去，只输出一个 JSON 对象，不要任何解释或代码块标记，字段固定为：",
         '{"action": "silence|brief|send", "text": "最终文本", "emoji": [{"category": "分类标题", "position": "start|end"}]}',
         "",
-        "规则：",
-        "- action 为 silence：这条消息不值得回（例如用户只是「嗯/哦/好/行/知道了」这类敷衍收尾、话题已经自然结束、或此刻沉默更自然），text 用空字符串；",
-        "- action 为 brief：只用极短的「？」「…？」「啊？」之类草草回应（例如对方说了让人无语、困惑、大脑短路的话），text 就填那一两个字的短句；",
-        "- action 为 send：正常回复，text 是最终发送的完整文本；",
+        build_rules_text(brief_enabled=brief_enabled, night_silence=night_silence),
         "- 只有当情绪/状态确实需要表情包时，才在 emoji 里填：category 必须是下面可用分类之一，position 为 start（表情包在文字前）或 end（表情包在文字后），并同时在 text 对应位置插入占位符 [EMOJI:分类标题]；",
         f"- 可用表情包分类：{cat_hint}；不要用不存在的分类，不要每句都带表情，不要插错语境。",
     ]
+    if extra:
+        lines.append(extra)
     if presence:
         lines.append(f"机器人此刻的状态：{presence}")
     lines.append(f"用户消息：{user_text[:600]}")
@@ -291,7 +305,9 @@ class ReplyPipeline:
         导致「用户每条消息都必回」（不会主动沉默）。这里补上同一判定。
         """
         try:
-            if not self._config().bool("pipeline.judge_enabled", True):
+            from . import silence as silence_mod
+
+            if not silence_mod.enabled(self._config()):
                 return None
             user_text = str(getattr(event, "message_str", "") or "").strip()
             return await self._judge(reply_text, user_text, self._presence_text(), self._relationship_text(event))
@@ -320,7 +336,13 @@ class ReplyPipeline:
             logger.info("[Storyteller] 判定沉默，不回复: session=%s", getattr(event, "unified_msg_origin", ""))
             return ""
         if action == "brief":
+            from . import silence as silence_mod
+
+            if not silence_mod.brief_enabled(self._config()):
+                return rewritten            # 草草回复已关闭 → 按正常回复发
             text = str(judged.get("text") or "").strip()
+            if len(text) > 20:              # 保险：brief 只该是极短反应
+                return rewritten
             return text if text else self._pick_brief()
         text = str(judged.get("text") or rewritten).strip()
         # 表情包发送策略：判定允许后 —— 用户 opt-out 则直接去掉；再按发送概率（含反馈权重）决定
@@ -399,18 +421,26 @@ class ReplyPipeline:
             return original
 
     async def _judge(self, rewritten: str, user_text: str, presence: str, relationship: str) -> dict[str, Any] | None:
-        if not self._config().bool("pipeline.judge_enabled", True):
+        from . import silence as silence_mod
+
+        config = self._config()
+        if not silence_mod.enabled(config):
             return {"action": "send", "text": rewritten}
         try:
-            # 表情包语境判定用独立名额（emoji.judge_provider_id）；未配置时按「留空回退模型」策略解析
-            provider, provider_id = resolve_chat_provider(self._plugin.context, self._config(), "emoji_judge")
-            if provider is None:
-                provider, provider_id = resolve_chat_provider(self._plugin.context, self._config(), "judge")
+            # 0.234：沉默判定改用**自己的**模型名额（silence.provider_id），
+            # 不再借用 emoji.judge_provider_id（那个名额另有表情包语境判定在用）；
+            # 旧键 pipeline.provider_id / models.judge_provider_id 由 models 的兼容键继续读取。
+            provider, provider_id = resolve_chat_provider(self._plugin.context, config, "judge")
             if provider is None:
                 return {"action": "send", "text": rewritten}
             if relationship:
                 presence = (presence + "\n" + relationship).strip() if presence else relationship
-            prompt = build_judge_prompt(rewritten, user_text, presence, self._categories())
+            prompt = build_judge_prompt(
+                rewritten, user_text, presence, self._categories(),
+                extra=silence_mod.build_context_block(self._plugin, config),
+                brief_enabled=silence_mod.brief_enabled(config),
+                night_silence=silence_mod.night_silence(config),
+            )
             resp = await chat_text(provider, self._config(), prompt=prompt, session_id="storyteller_judge")
             self._record("judge", provider_id or "default", resp)
             result = parse_judge(str(getattr(resp, "completion_text", "") or ""))

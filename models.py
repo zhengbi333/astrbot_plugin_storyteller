@@ -19,7 +19,8 @@ from .log import logger
 # 功能名 -> 配置键（各功能所属大类的模型键）
 FUNCTION_KEYS = {
     "rewrite": "rewrite.provider_id",                # 二次润色
-    "judge": "pipeline.provider_id",                 # 沉默/表情包/草草回复判定
+    "judge": "silence.provider_id",                  # 智能沉默判定（沉默/草草回复）
+    "relation_judge": "relationship.provider_id",   # 关系判断（印象提炼 + 好感度微调）
     "emoji_judge": "emoji.judge_provider_id",        # 表情包语境判定（独立名额，可与判定模型不同）
     "vision": "vision.provider_id",                  # 多模态/识图
     "embedding": "memory.embedding_provider_id",     # 嵌入
@@ -44,7 +45,8 @@ FUNCTION_KEYS = {
 # 旧版本 models 大类的键（迁移期兼容读取）
 _LEGACY_KEYS = {
     "rewrite": "models.rewrite_provider_id",
-    "judge": "models.judge_provider_id",
+    "judge": ("pipeline.provider_id", "models.judge_provider_id"),
+    "relation_judge": ("pipeline.provider_id", "models.judge_provider_id"),
     "vision": "models.vision_provider_id",
     "embedding": "models.embedding_provider_id",
     "presence": "models.presence_provider_id",
@@ -61,7 +63,8 @@ _LEGACY_KEYS = {
 # 功能中文名（报错日志用）
 _FUNCTION_CN = {
     "rewrite": "润色",
-    "judge": "判定",
+    "judge": "沉默判定",
+    "relation_judge": "关系判断",
     "emoji_judge": "表情包判定",
     "vision": "识图",
     "embedding": "嵌入",
@@ -97,8 +100,9 @@ def configured_id(config: Any, function: str) -> str:
     if value:
         return value
     legacy = _LEGACY_KEYS.get(function)
-    if legacy:
-        old = str(config.get(legacy, "") or "").strip()
+    # 兼容键支持单键（str）或多级（tuple/list，按顺序取第一个有值的）
+    for legacy_key in ((legacy,) if isinstance(legacy, str) else (legacy or ())):
+        old = str(config.get(legacy_key, "") or "").strip()
         if old:
             return old
     return ""

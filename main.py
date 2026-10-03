@@ -52,6 +52,7 @@ from .reply_pipeline import ReplyPipeline, squeeze_reply
 from .reply_polish import ReplyPolisher
 from .rewrite import assemble_request, rewrite_user_message
 from .schedule import ScheduleStore, build_schedule_anchor, current_activity
+from . import silence as silence_mod
 from .token_usage import TokenStore
 from .ui_state import UiStateStore
 from .vision import (
@@ -444,7 +445,8 @@ class StorytellerPlugin(Star):
     async def _judge_relationship(self, user_id: str, texts: list[str]) -> None:
         """批量互动后由 LLM 精确判断关系变化并提炼「最近印象」。
 
-        - 调用 judge/关系判断模型（pipeline.provider_id，关系页内可配）；
+        - 调用「关系判断模型」（relationship.provider_id，关系页内可配；
+          0.234 起独立成名额，旧键 pipeline.provider_id / models.judge_provider_id 仍兼容）；
         - 输出同时含情感 delta（写好感度）与「最近印象」（写人物卡 impression）；
         - 节流：距上次印象提炼不足 impression_min_interval 分钟则本次跳过（防高频烧 token）；
         - 触发条数由 relationship.impression_batch 控制（在消息观察层判断）。
@@ -466,7 +468,7 @@ class StorytellerPlugin(Star):
                     last_ts = 0.0
                 if time.time() - last_ts < min_interval:
                     return
-            provider, provider_id = resolve_chat_provider(self.context, self.config, "judge")
+            provider, provider_id = resolve_chat_provider(self.context, self.config, "relation_judge")
             if provider is None:
                 return
             stage = stage_for(float(current.get("affection", 0.15)))
@@ -2428,7 +2430,7 @@ class StorytellerPlugin(Star):
                 if isinstance(judged, dict):
                     action = str(judged.get("action") or "send").strip().lower()
                     reason = str(judged.get("reason") or "")[:80]
-                    limit = max(0, min(10, self.config.int("pipeline.silence_streak_limit", 2)))
+                    limit = silence_mod.streak_limit(self.config)
                     streak = int(self._silence_streak.get(session_id, 0))
                     if action == "silence" and streak < limit:
                         self._silence_streak[session_id] = streak + 1
@@ -2447,8 +2449,15 @@ class StorytellerPlugin(Star):
                     if action == "silence":
                         logger.info("[Storyteller] 连续沉默达上限（%s），强制回复一次: session=%s", limit, session_id)
                     self._silence_streak[session_id] = 0
-                    if action == "brief":
+                    if action == "brief" and silence_mod.brief_enabled(self.config):
                         _brief_text = str(judged.get("text") or "").strip()
+                        # 0.234 保险：brief 只该是「？」这类极短反应；异常偏长说明判定跑偏，
+                        # 宁可按正常回复发（旧行为会把已生成的内容整段丢掉）
+                        if len(_brief_text) > 20:
+                            logger.info(
+                                "[Storyteller] brief 文本异常偏长（%s 字），按正常回复处理", len(_brief_text),
+                            )
+                            _brief_text = ""
                 # 文本定稿：草草回复优先用它（那轮只想回一句）；否则用润色结果，润色失败则用原文
                 if _brief_text:
                     content = _brief_text
@@ -2593,7 +2602,7 @@ class StorytellerPlugin(Star):
         tasks: dict[str, Any] = {}
         if with_polish and content:
             tasks["polish"] = asyncio.ensure_future(self._polish_safe(event, content))
-        if self.config.bool("pipeline.takeover_judge_enabled", True) and not caps_done(event):
+        if silence_mod.enabled(self.config) and not caps_done(event):
             tasks["judge"] = asyncio.ensure_future(self._judge_safe(event, content))
         if "emoji_send" not in caps_done(event):
             tasks["emoji"] = asyncio.ensure_future(self._emoji_pick_safe(event, content))
@@ -2721,7 +2730,7 @@ class StorytellerPlugin(Star):
         started = time.time()
         judge_task = None
         emoji_task = None
-        if self.config.bool("pipeline.takeover_judge_enabled", True) and not caps_done(event):
+        if silence_mod.enabled(self.config) and not caps_done(event):
             judge_task = asyncio.ensure_future(self._judge_safe(event, content))
         if "emoji_send" not in caps_done(event):
             emoji_task = asyncio.ensure_future(self._emoji_pick_safe(event, content))
