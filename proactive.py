@@ -68,6 +68,7 @@ class ProactiveManager:
         except Exception:
             self._user_state_path = None
         self._load_user_state()
+        self._load_meta()
 
     # ------------------------------------------------------------ 未回应状态存取
 
@@ -89,6 +90,55 @@ class ProactiveManager:
                     }
         except Exception:
             self._user_state = {}
+
+    # ------------------------------------------------------------ 0.231 频控元数据落盘
+    #
+    # 背景：`_daily_count` / `_last_sent` 此前是**纯内存**字典 —— 插件每次重载（AstrBot 重启、
+    # 更新插件、面板重载）都会归零，于是 `proactive.max_daily`（默认 3）形同虚设：
+    # 同一自然日里重载几次就可能多发几轮。这里把它们落到与 user_state 同目录的 proactive_meta.json。
+
+    def _meta_path(self) -> Any:
+        if self._user_state_path is None:
+            return None
+        return self._user_state_path.parent / "proactive_meta.json"
+
+    def _load_meta(self) -> None:
+        path = self._meta_path()
+        if path is None or not path.exists():
+            return
+        try:
+            import json as _json
+
+            raw = _json.loads(path.read_text(encoding="utf-8") or "{}")
+            if not isinstance(raw, dict):
+                return
+            daily = raw.get("daily")
+            if isinstance(daily, dict):
+                self._daily_count = {str(k): int(v or 0) for k, v in daily.items()}
+            sent = raw.get("last_sent")
+            if isinstance(sent, dict):
+                self._last_sent = {str(k): float(v or 0) for k, v in sent.items()}
+        except Exception:
+            pass
+
+    def _save_meta(self) -> None:
+        path = self._meta_path()
+        if path is None:
+            return
+        try:
+            import json as _json
+
+            # 只保留最近 7 天的每日计数，避免无限增长
+            cutoff = time.strftime("%Y-%m-%d", time.localtime(_now_ts() - 7 * 86400))
+            daily = {k: v for k, v in self._daily_count.items() if str(k) >= cutoff}
+            self._daily_count = daily
+            path.write_text(
+                _json.dumps({"daily": daily, "last_sent": self._last_sent},
+                            ensure_ascii=False, indent=1),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
 
     def _save_user_state(self) -> None:
         if self._user_state_path is None:
@@ -277,16 +327,60 @@ class ProactiveManager:
         raw = str(self._config().get("proactive.target_users", "") or "")
         return [item for item in raw.replace(",", " ").split() if item]
 
+    def _next_sleep_seconds(self) -> float:
+        """下一次检查前等多久（0.231）。
+
+        可发时段内 → 随机 min~max 小时（保持拟人的不确定感）；
+        若此刻正处在免打扰 / 时间窗外 → **睡到下一个可行时段开始**，
+        而不是继续盲睡 4~8 小时（此前会一路撞在免打扰里，甚至永远轮不到可发时刻）。
+        """
+        low = max(1.0, self._config().float("proactive.min_interval_hours", 4.0))
+        high = max(low, self._config().float("proactive.max_interval_hours", 8.0))
+        base = random.uniform(low, high) * 3600
+        try:
+            start = str(self._config().get("proactive.time_start", "09:00") or "09:00").strip()
+            end = str(self._config().get("proactive.time_end", "22:00") or "22:00").strip()
+            quiet = str(self._config().get("proactive.quiet_hours", "") or "").strip()
+            blocked = bool(quiet) and self._in_quiet_hours(quiet)
+            if not blocked:
+                now_m = _minutes_hm(_hhmm())
+                s_m = _minutes_hm(start)
+                e_m = _minutes_hm(end)
+                if s_m <= e_m:
+                    blocked = not (s_m <= now_m < e_m)
+                else:  # 跨零点的时间窗
+                    blocked = not (now_m >= s_m or now_m < e_m)
+            if blocked:
+                now_m = _minutes_hm(_hhmm())
+                s_m = _minutes_hm(start)
+                delta = (s_m - now_m) % (24 * 60)
+                if delta > 0:
+                    # 免打扰若比时间窗更晚结束，就等免打扰结束
+                    if quiet:
+                        q_end = quiet.split("-", 1)[1].strip() if "-" in quiet else ""
+                        if q_end:
+                            q_m = _minutes_hm(q_end)
+                            dq = (q_m - now_m) % (24 * 60)
+                            if dq > 0:
+                                delta = max(delta, dq) if delta > 0 else dq
+                    return min(max(60.0, delta * 60), 12 * 3600)
+        except Exception:
+            pass
+        return base
+
     async def run_loop(self) -> None:
-        """后台循环：随机间隔后尝试主动触达。"""
+        """后台循环：启动后补检一次，之后按间隔检查；撞到不可发时段就睡到下一可行时段（0.231）。"""
+        # 启动补检：此前是「先睡 4~8 小时再检查」，插件每次重载都会把这个睡眠打断，
+        # 于是可能一直轮不到可发时刻（实测用户 last_sent_at 长期为 0 = 从未主动发过）。
+        await asyncio.sleep(90)
         while True:
-            low = max(1.0, self._config().float("proactive.min_interval_hours", 4.0))
-            high = max(low, self._config().float("proactive.max_interval_hours", 8.0))
-            await asyncio.sleep(random.uniform(low, high) * 3600)
-            if not self.enabled():
-                continue
-            for user in self.target_users():
-                await self._maybe_send(user)
+            if self.enabled():
+                for user in self.target_users():
+                    try:
+                        await self._maybe_send(user)
+                    except Exception as exc:
+                        logger.warning("[Storyteller] 主动触达异常（忽略）: %s", exc)
+            await asyncio.sleep(self._next_sleep_seconds())
 
     async def _maybe_send(self, user: str, *, force: bool = False) -> None:
         # ── 由头引擎：汇集 → 挑一条好时机的由头 ──
@@ -379,6 +473,7 @@ class ProactiveManager:
             last_sent_before = self._last_sent.get(user)
             self._last_sent[user] = _now_ts()
             self._daily_count[_today()] = self._daily_count.get(_today(), 0) + 1
+            self._save_meta()  # 0.231：计数与上次发送时间落盘（重载后频控不失效）
             self._daily_per_user[user] = self._daily_per_user.get(user, 0) + 1
             engine._mark_raised(user, cand.text)
             engine._note_daypart_sent(daypart_bucket(), user)
@@ -421,6 +516,13 @@ class ProactiveManager:
         last_chat = self._last_interaction.get(user)
         if last_chat and _now_ts() - last_chat < cooldown * 60:
             return False, f"刚聊完 {cooldown} 分钟内不打扰"
+        # 0.231：显式的「最短间隔」门。此前最短间隔只靠 run_loop 的睡眠隐式保证，
+        # 一旦有别的入口（启动补检 / 面板手动触发 / 重载后重排）就会绕过它。
+        min_iv = max(0.0, self._config().float("proactive.min_interval_hours", 4.0))
+        last_sent_any = self._last_sent.get(user) or 0
+        if min_iv > 0 and last_sent_any and _now_ts() - last_sent_any < min_iv * 3600:
+            left = min_iv * 3600 - (_now_ts() - last_sent_any)
+            return False, f"距上次主动还不到最短间隔 {min_iv:g} 小时（还需约 {left / 60:.0f} 分钟）"
         # 未回应降速：连续未回应越多，间隔拉得越长（像人一样，被晾着就少凑上去）
         st = self._user_state_for(user)
         streak = max(0, int(st.get("streak", 0) or 0))
