@@ -1467,7 +1467,15 @@ class StorytellerPlugin(Star):
                 return ""
             parts = str(uid or "").split(":")
             ctx: dict = {"session_id": str(uid or ""), "platform": parts[0] if parts else "", "persona_id": persona_id}
-            events = list(getter(session_context=ctx, limit=limit) or [])
+            # 0.209：`limit` 的语义从"条数"改成**轮数**（一问一答算一轮）。
+            # 以前 limit=4 只拿到 4 条消息（≈1 轮），聊到第 10 轮时模型几乎看不到前文；
+            # 现在同样的 4 表示"最近 4 轮"。因为 bot 是拆条发送的（一轮可能有好几条），
+            # 这里先按"轮数 × 6"多取一些条数，渲染前再按轮精确截断。
+            rounds = max(0, min(12, int(limit)))
+            # 多取**一轮**作缓冲：否则取到的条数可能正好跨在轮边界上（如只取到"上一轮的尾巴 + 这一轮"），
+            # 按轮截断时就切不出完整的一轮。
+            fetch = min(80, max(6, (rounds + 1) * 6))
+            events = list(getter(session_context=ctx, limit=fetch) or [])
             from .timeline_filter import is_llm_context_event
 
             rows: list[tuple[str, str, str]] = []  # (time, label, text)
@@ -1501,6 +1509,12 @@ class StorytellerPlugin(Star):
                         rows = list(reversed(rows))
                 except Exception:
                     pass
+            # 0.209：按轮截断——以"对方开口"为轮起点，只保留最近 rounds 轮
+            # （我这边的拆条消息不会被误当成新轮；"系统"提示也不算轮起点）
+            if rounds > 0 and rows:
+                starts = [i for i, (_ts, label, _txt) in enumerate(rows) if label not in ("我", "系统")]
+                if len(starts) > rounds:
+                    rows = rows[starts[-rounds]:]
             return "\n".join(f"{label}：{text}" for _, label, text in rows)
         except Exception:
             return ""
