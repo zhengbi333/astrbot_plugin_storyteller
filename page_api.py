@@ -1209,13 +1209,20 @@ class StorytellerWebApi:
             return False, "回退模型为空、各功能也未配置模型——所有生成请求都会被驳回"
 
         def bg_tasks_status() -> tuple[bool, str]:
+            """后台循环是否按配置在跑。
+
+            0.216：原判定只看"有没有活着的任务"——内心模块关闭时循环本就不该启动，
+            却会报 FAIL（误报）。现在按配置算出"应该有哪些"，再逐一核对。
+            """
             alive: list[str] = []
-            # 常驻后台循环（真实属性名：_mind_task；兼容其它命名）
+            names = {
+                "_mind_task": "内心循环", "_mind_loop_task": "内心循环",
+                "_proactive_loop_task": "主动循环", "proactive_loop": "主动循环",
+            }
             for attr in ("_mind_task", "_mind_loop_task", "_proactive_loop_task"):
                 task = getattr(plugin, attr, None)
                 if task is not None and callable(getattr(task, "done", None)) and not task.done():
                     alive.append(attr)
-            # 主动管理器内部循环（proactive manager 的属性名因版本而异，防御探测）
             manager = getattr(plugin, "proactive", None)
             if manager is not None:
                 for attr in ("loop_task", "_loop_task", "_proactive_task"):
@@ -1223,13 +1230,20 @@ class StorytellerWebApi:
                     if mgr_task is not None and callable(getattr(mgr_task, "done", None)) and not mgr_task.done():
                         alive.append("proactive_loop")
                         break
-            if not alive:
-                return False, "未发现运行中的后台任务（内心循环未启动或被停止）"
-            names = {
-                "_mind_task": "内心循环", "_mind_loop_task": "内心循环",
-                "_proactive_loop_task": "主动循环", "proactive_loop": "主动循环",
-            }
-            return True, "后台任务运行中（" + "、".join(names.get(a, a) for a in alive) + "）"
+            running = {names.get(a, a) for a in alive}
+            expect: list[str] = []
+            if plugin.config.bool("mind.enabled", True):
+                expect.append("内心循环")
+            if plugin.config.bool("proactive.enabled", False):
+                expect.append("主动循环")
+            if not expect:
+                return True, "没有需要常驻的后台循环（内心与主动都已关闭）"
+            missing = [name for name in expect if name not in running]
+            if not running:
+                return False, "应运行的后台循环没在跑：" + "、".join(expect) + "（插件刚启动时可能还在起，稍后重试）"
+            if missing:
+                return False, "部分后台循环未运行：" + "、".join(missing) + "；在跑的有 " + "、".join(sorted(running))
+            return True, "后台任务运行中（" + "、".join(sorted(running)) + "）"
 
         def logger_status() -> tuple[bool, str]:
             from .log import get_logger
@@ -1252,6 +1266,117 @@ class StorytellerWebApi:
         add("memory_bridge", "记忆联动", "与【为你篆刻的历史】的桥接可用", memory_bridge_status)
         add("models", "模型配置", "至少一个功能模型或回退模型在位", models_status)
         add("bg_tasks", "后台任务", "定时循环（内心/关系/画像/主动）存活", bg_tasks_status)
+        # ---- 0.216：补齐此前没有自检项的模块（清障页漏检 = 用户会误以为"全绿就都正常"）----
+        def intercept_status() -> tuple[bool, str]:
+            """拦截链路：模式 + 模板能否正常渲染（坏模板会被回退，这里提前暴露）。"""
+            from .intercept import DEFAULT_TEMPLATE, TEMPLATE_PLACEHOLDERS, replace_template
+
+            mode = str(plugin.config.get("intercept.mode", "接管改换") or "接管改换").strip()
+            raw = str(plugin.config.get("intercept.template", "") or "").strip()
+            template = raw or DEFAULT_TEMPLATE
+            values = {k: "<" + k + ">" for k in TEMPLATE_PLACEHOLDERS}
+            try:
+                rendered = replace_template(template, values)
+            except Exception as exc:
+                return False, "模板渲染失败：" + type(exc).__name__ + ": " + str(exc)
+            missing = [ph for ph in ("{人格}", "{当前说话}") if ph not in template]
+            if missing:
+                return False, "模板缺少核心占位符 " + "、".join(missing) + " → 每次都会回退默认模板（你的改动不生效）"
+            if any(ph in rendered for ph in ("{人格}", "{身份}", "{当前说话}", "{上下文}")):
+                return False, "模板里有占位符没被替换（书写异常）→ 会回退默认模板"
+            return True, "拦截模式=" + mode + "，模板渲染正常（" + str(len(template)) + " 字）"
+
+        def debounce_status() -> tuple[bool, str]:
+            enabled = bool(plugin.config.bool("debounce.enabled", False))
+            manager = getattr(plugin, "debounce", None) or getattr(plugin, "_debounce", None)
+            if not enabled:
+                return True, "已在配置里关闭（消息即时处理）"
+            if manager is None:
+                return False, "防抖已开启但没有防抖管理器实例 → 连续消息不会被合并"
+            pending = 0
+            try:
+                buffers = getattr(manager, "_buffers", None)
+                pending = len(buffers) if isinstance(buffers, dict) else 0
+            except Exception:
+                pending = 0
+            return True, "防抖就绪（" + str(pending) + " 个会话正在合并）"
+
+        def rewrite_status() -> tuple[bool, str]:
+            enabled = bool(plugin.config.bool("rewrite.enabled", False))
+            template = str(plugin.config.get("rewrite.template", "") or "").strip()
+            if not enabled:
+                return True, "已在配置里关闭（不会二次润色）"
+            if not template:
+                return False, "润色已开启但模板为空 → 每次都会直接返回原回复，等于没润色"
+            if "{回复" not in template:
+                return True, "润色已开启（模板未含 {回复}，原文会附在末尾）"
+            return True, "润色可用（模板 " + str(len(template)) + " 字）"
+
+        def image_status() -> tuple[bool, str]:
+            enabled = bool(plugin.config.bool("image.enabled", False))
+            records = 0
+            try:
+                store = getattr(plugin, "image_store", None)
+                if store is not None and callable(getattr(store, "records", None)):
+                    records = len(store.records() or [])
+            except Exception:
+                records = 0
+            backend = str(plugin.config.get("image.backend", "") or "astrbot").strip() or "astrbot"
+            provider_id = str(plugin.config.get("image.provider_id", "") or "").strip()
+            if not enabled:
+                return True, "已在配置里关闭（不会生图；历史 " + str(records) + " 张）"
+            if backend == "api" and not provider_id:
+                return False, "生图已开启且后端为「独立 API」，但没有配置生图模型 → 无法生成"
+            return True, "生图可用（后端=" + backend + "，历史 " + str(records) + " 张）"
+
+        def wardrobe_status() -> tuple[bool, str]:
+            enabled = bool(plugin.config.bool("wardrobe.enabled", False))
+            store = getattr(plugin, "wardrobe_store", None)
+            if store is None:
+                if enabled:
+                    return False, "穿搭已开启但衣柜存储未初始化"
+                return True, "未启用穿搭（衣柜未初始化）"
+            items = 0
+            try:
+                data = store.load() or {}
+                for value in (data.get("closets") or {}).values():
+                    items += len(value or [])
+            except Exception as exc:
+                return False, "衣柜数据读取失败：" + type(exc).__name__
+            if not enabled:
+                return True, "已在配置里关闭（衣柜 " + str(items) + " 件）"
+            return True, "穿搭可用（衣柜 " + str(items) + " 件）"
+
+        def mindstream_status() -> tuple[bool, str]:
+            from . import mindstream as inner_mod
+
+            if not inner_mod.enabled(plugin):
+                return True, "已在配置里关闭（不产生也不回注思绪）"
+            try:
+                items = plugin.mind_store.inner_items(limit=200)
+            except Exception as exc:
+                return False, "思绪留档读取失败：" + type(exc).__name__
+            count = int(inner_mod.inject_count(plugin))
+            if count <= 0:
+                return True, "留档 " + str(len(items)) + " 条；回注条数为 0 → 只留档、不回注"
+            return True, "思绪正常（留档 " + str(len(items)) + " 条，每轮回注 " + str(count) + " 条）"
+
+        def capabilities_status() -> tuple[bool, str]:
+            from .capabilities import CAPABILITIES
+
+            total = len(CAPABILITIES)
+            if total <= 0:
+                return False, "能力注册表为空 → 模型无法主动做事"
+            native = bool(plugin.config.bool("capabilities.native_tools", True))
+            return True, str(total) + " 个能力已注册（原生工具=" + ("开" if native else "关，走文本协议") + "）"
+
+        add("intercept", "拦截与模板", "拦截模式与模板能否正常渲染", intercept_status)
+        add("debounce", "消息防抖", "防抖开启时合并器是否就位", debounce_status)
+        add("rewrite", "润色", "润色开关与模板是否配套", rewrite_status)
+        add("image", "生图", "生图后端与模型配置是否齐备", image_status)
+        add("wardrobe", "穿搭与衣柜", "衣柜数据可读", wardrobe_status)
+        add("mindstream", "思绪", "留档可读、回注配置是否生效", mindstream_status)
+        add("capabilities", "能力清单", "能力注册表与工具模式", capabilities_status)
         add("logger", "日志系统", "插件日志可写", logger_status)
         return items
 

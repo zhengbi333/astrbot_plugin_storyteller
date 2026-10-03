@@ -4861,8 +4861,8 @@ async function renderTroubleshoot() {
       </div>
     </section>
     <section class="panel">
-      <div class="panel-head"><h3 class="panel-title">模块清单</h3><span class="hint">${checks.length} 项</span></div>
-      <div id="check-list" class="check-grid">${list}</div>
+      <div class="panel-head"><h3 class="panel-title">模块清单</h3><span class="hint">${checks.length ? `${checks.length} 项` : "清单未加载"}</span></div>
+      <div id="check-list" class="check-grid">${list || '<div class="hint" style="padding:10px 0">还没有清单数据：点上方「一键只读测试」即可逐项体检全部模块。</div>'}</div>
     </section>
   `;
   const runSingle = async (key, btn) => {
