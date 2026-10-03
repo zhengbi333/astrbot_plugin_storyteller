@@ -444,6 +444,10 @@ class DebounceManager:
                 return False
             # 撤回通知：窗口内移除对应消息
             recalled = self._recall_message_id(event)
+            # 0.232：撤回过滤开关（debounce.recall_filter，默认开）。此前撤回处理无条件执行，
+            # 这个开关改了没效果。
+            if recalled and not self._config().bool("debounce.recall_filter", True):
+                recalled = ""
             if recalled:
                 removed = self._remove_recalled(uid, recalled)
                 logger.info("窗口内撤回消息: session=%s removed=%s", uid, removed)

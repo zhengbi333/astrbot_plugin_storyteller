@@ -530,6 +530,10 @@ class StorytellerPlugin(Star):
         命令消息（/ 前缀）不介入。
         """
         try:
+            # 0.232：插件总开关（general.enabled）。schema 里写着"关闭后插件不再参与对话，
+            # 但 WebUI 面板仍可正常查看与设置"——可它此前**从未被读取**，关掉完全不生效。
+            if not self.config.bool("general.enabled", True):
+                return
             if self._is_self_message(event):
                 # 平台回显的自身消息：静默阻断，防止机器人回复自己
                 self._stop_llm(event)
@@ -658,7 +662,11 @@ class StorytellerPlugin(Star):
                 relationship=anchors.get("relationship", ""),
             )
             # 可选：润色用户消息（走「润色模型」配置，驳回时跳过）
-            if self.config.bool("rewrite.enabled", False) and text:
+            # 0.232：这里此前读的是 rewrite.enabled（"回复润色总开关"，默认 **开**）——
+            # 于是"润色用户消息"实际上被"回复润色"的开关控制，而它自己的开关
+            # rewrite.rewrite_user_enabled（默认 **关**）从未被读取：
+            # 结果是**默认就会**额外调一次模型改写用户消息（多花 token，还可能改歪），与文档相反。
+            if self.config.bool("rewrite.rewrite_user_enabled", False) and text:
                 provider, _pid = _resolve_intercept(self.context, self.config, "rewrite")
                 if provider is not None:
                     voice = self.voice_store.load()
@@ -2974,6 +2982,9 @@ class StorytellerPlugin(Star):
         """主链 LLM 回复后：Token 记账（主链真实调用）+ 二次润色 + 智能判定 + 表情包占位符渲染。"""
         # 主链真实调用的 token 记账（不受回复链路开关影响；接管改换不触发本事件）
         try:
+            # 0.232：总开关关闭时不参与回复加工（面板仍可用）
+            if not self.config.bool("general.enabled", True):
+                return
             self._record_astr_total(event, resp)
         except Exception:
             pass
