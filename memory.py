@@ -25,6 +25,23 @@ COMMITMENT_HINTS = (
     "约好", "我们约", "承诺",
 )
 
+# 0.236：**时间词 + 动作承诺词**——此前两套词表里一个时间词都没有，
+# 于是「显卡的事我看了，明天整理好发你。」这类"带时间点的承诺"完全检测不到（实测 False）。
+# 单个词都太泛（「明天」可能只是寒暄），所以这两个表配合使用：**时间 + 动作**同时出现才算候选，
+# 再交给 LLM 确认（见 detect_commitment / detect_self_commitment）。
+TIME_HINTS = (
+    "明天", "后天", "大后天", "今晚", "今夜", "明早", "明晚", "次日",
+    "周一", "周二", "周三", "周四", "周五", "周六", "周日", "周天", "下周一", "下周二",
+    "下周", "下个月", "月底", "月底前", "过几天", "待会", "待会儿", "等下", "等会",
+    "稍后", "一会儿", "过会儿", "晚点", "回头", "抽空", "有空", "下班后", "睡醒",
+)
+ACTION_HINTS = (
+    "发你", "发过去", "发给我", "发我", "给你", "给你看", "拿给你", "带给你", "送你",
+    "帮你", "替你", "帮你查", "帮你问", "给你查", "整理好", "整理一下", "弄好", "做好",
+    "写完", "查一下", "问问", "看看", "找一下", "找找", "安排", "回复你", "告诉你",
+    "汇报", "交给你", "发一份", "出一版", "搞完", "搞定", "办完",
+)
+
 PROFILE_HINTS = (
     "我喜欢", "我讨厌", "我不喜欢", "我最", "我习惯", "我一般", "我平时",
     "我超", "我特别", "我不吃", "我吃", "我住", "我是", "我在",
@@ -107,7 +124,10 @@ def detect_commitment(text: str) -> bool:
     if any(hint in clean for hint in COMMITMENT_HINTS):
         return True
     # 0.230：再兜一层强约定词（两套词表历史上漂移过一次，这里保证不再漏）
-    return any(hint in clean for hint in REMEMBER_PROMISE_STRONG)
+    if any(hint in clean for hint in REMEMBER_PROMISE_STRONG):
+        return True
+    # 0.236：兜「时间 + 动作」组合（如「明天把报告发我」——没有显式"记住"字样，但是明确请求）
+    return has_future_action(clean)
 
 
 def detect_profile(text: str) -> bool:
@@ -116,6 +136,47 @@ def detect_profile(text: str) -> bool:
     if len(clean) < 4 or len(clean) > 200:
         return False
     return any(hint in clean for hint in PROFILE_HINTS)
+
+
+def has_future_action(text: str) -> bool:
+    """「时间词 + 动作承诺词」同时出现 → 可能是带时间点的约定/请求。
+
+    两表各自都太泛（「明天」可能只是寒暄、「看看」可能只是眼下动作），
+    组合起来才作为**候选**，最终仍由 LLM 确认是否真的该记。
+    """
+    clean = (text or "").strip()
+    if len(clean) < 4 or len(clean) > 300:
+        return False
+    return any(k in clean for k in TIME_HINTS) and any(k in clean for k in ACTION_HINTS)
+
+
+def detect_self_commitment(text: str) -> bool:
+    """检测**自己（机器人）刚说出口的话**里是否包含对未来做出的承诺。
+
+    与 detect_commitment 的区别：那个看「对方要我记住什么」，这个看「**我自己答应了什么**」——
+    「明天整理好发你」这类话说出口就该被记住，否则第二天会忘（实测此前完全没覆盖）。
+    """
+    clean = (text or "").strip()
+    if len(clean) < 4 or len(clean) > 300:
+        return False
+    if any(hint in clean for hint in REMEMBER_PROMISE_STRONG):
+        return True
+    return has_future_action(clean)
+
+
+def build_self_commitment_prompt(text: str) -> str:
+    """构造「从我刚说的话里提炼我的承诺」的提示词（0.236）。"""
+    return (
+        "下面是你（助手）刚刚对对方说的一句话。判断这句话里是否包含**你对未来做出的承诺**："
+        "比如「明天整理好发你」「回头帮你查」「晚点把文件给你」「下周约」这类"
+        "**你答应对方以后要做的事**。\n"
+        "如果有，只输出一行 JSON：{\"content\": \"精简的中文承诺内容（第三人称、带双方称呼，"
+        "写清你答应了什么、约定在什么时候）\", \"memory_type\": \"promise\"}——"
+        "memory_type 固定为 promise。\n"
+        "如果只是普通的寒暄、感叹、或并没有承诺任何未来动作（如「明天见」「晚安」），"
+        "只输出空字符串。不要任何解释或标记。\n\n"
+        f"你刚说的话：{text.strip()}"
+    )
 
 
 async def write_memory(

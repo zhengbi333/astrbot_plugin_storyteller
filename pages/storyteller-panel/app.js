@@ -3254,6 +3254,7 @@ async function renderProactive() {
         <button class="btn glow" id="pro-trigger" style="font-weight:700">▶ 立即尝试一次</button>
         <button class="btn glow" id="pro-preview">试发预览（不发送）</button>
       </div>
+      <div id="pro-preview-out"></div>
     </section>
     <div class="rel-layout" style="align-items:flex-start">
       <div class="rel-left" style="flex:0 0 300px">
@@ -3329,7 +3330,7 @@ async function renderProactive() {
                   `<option value="${esc(cur)}" selected>${esc(cur) || "（未设置）"}</option>`;
                 return `<div class="setting-card"><div class="field">
                   <div class="field-title">消息平台前缀<span class="field-key">session_platform</span></div>
-                  <div class="hint">默认 QQ（aiocqhttp）。选项来自当前 AstrBot 已连接适配器；若目标会话属于其它平台（如 Telethon / QQ 官方 API），请在 AstrBot 连接后再选对应平台，发送失败时插件也会自动诊断并提示。</div>
+                  <div class="hint">这里要选的是<b>平台标识</b>（会话前缀用的就是它，即括号前那个名字，如「阡墨」），<b>不是</b>括号里的适配器类型（如 aiocqhttp）。选项来自 AstrBot 当前已连接平台；选错时主动消息发不出去，清障页的「主动 · 发送平台」会报出来。</div>
                   <select class="input" data-setting="proactive.session_platform" data-type="text">${extra}${opts}</select>
                 </div></div>`;
               }
@@ -3371,25 +3372,53 @@ async function renderProactive() {
   });
   const pvBtn = document.getElementById("pro-preview");
   if (pvBtn) pvBtn.addEventListener("click", async () => {
+    // 0.236：此前点下去只有按钮变灰、其余零反馈 —— 这一步要跑「素材收集（含联网检索）+ 生成」，
+    // 真实环境可能十几秒，用户会以为"没反应"。现在：立刻显示加载、30 秒超时、失败也说清原因。
+    const out = document.getElementById("pro-preview-out");
+    const label = pvBtn.textContent;
+    const showCard = (html) => {
+      if (out) out.innerHTML = `<div class="setting-card" style="margin-top:10px">${html}</div>`;
+      else {
+        const box = document.createElement("div");
+        box.className = "setting-card";
+        box.style.cssText = "margin-top:10px";
+        box.innerHTML = html;
+        pvBtn.insertAdjacentElement("afterend", box);
+      }
+    };
     pvBtn.disabled = true;
+    pvBtn.textContent = "预览中…";
+    showCard(`<div class="field-title">试发预览（不发送）</div>
+      <div class="hint">正在收集素材并生成（状态 / 日程 / 记忆 / 见闻检索 → 组织语言），通常几秒到十几秒…</div>`);
     try {
-      const res = await apiPost("proactive/preview", {});
-      const s = res.sources || {};
-      const chips = ["mood", "activity", "memory", "timeline", "search", "dream"].filter((k) => s[k]).map(srcChip).join("");
-      const box = document.createElement("div");
-      box.className = "setting-card";
-      box.style.cssText = "margin-top:10px";
-      box.innerHTML = `
-        <div class="field-title">试发预览</div>
-        <div class="hint">${res.should_send ? "✅ 当前意愿" : "⚠️ 当前不会发"}：${esc(res.reason || "")}</div>
-        <div class="hint">${chips} ${Object.keys(s).filter((k) => s[k]).length} 路素材</div>
-        ${res.text ? `<div class="hint" style="color:var(--ink)">「${esc(res.text)}」</div>` : "<div class='hint'>（没有自然想说的话）</div>"}
-      `;
-      const prev = document.getElementById("pro-preview-out");
-      if (prev) prev.replaceWith(box); else pvBtn.insertAdjacentElement("afterend", box);
-      box.id = "pro-preview-out";
-    } catch (err) { toast(`预览失败：${err.message}`, "err"); }
+      const res = await Promise.race([
+        apiPost("proactive/preview", {}),
+        new Promise((_ok, no) => setTimeout(() => no(new Error("预览超时（30 秒）—— 模型或联网检索较慢，请稍后再试")), 30000)),
+      ]);
+      if (res && res.ok === false) {
+        throw new Error(res.message || res.error || "后端返回失败（未给出原因）");
+      }
+      const s = (res && res.sources) || {};
+      const known = ["mood", "activity", "memory", "timeline", "search", "dream"];
+      const chips = known.filter((k) => s[k]).map(srcChip).join("");
+      const used = Object.keys(s).filter((k) => s[k]).length;
+      showCard(`
+        <div class="field-title">试发预览（未发送）</div>
+        <div class="hint">${res.should_send ? "✅ 当前意愿：可以发" : "⚠️ 当前不会发"}：${esc(res.reason || "（无特别原因）")}</div>
+        <div class="hint">取材 ${used} 路 ${chips}</div>
+        ${res.text
+          ? `<div class="hint" style="color:var(--ink)">「${esc(res.text)}」</div>`
+          : '<div class="hint">（这一轮没有自然想说的话 —— 通常是没有足够新素材、或刚聊过还在顺延期）</div>'}
+      `);
+    } catch (err) {
+      const msg = String((err && err.message) || err);
+      showCard(`<div class="field-title">试发预览失败</div>
+        <div class="hint" style="color:var(--danger, #e66)">${esc(msg)}</div>
+        <div class="hint">若提示平台前缀不匹配，请到本页「消息平台前缀」下拉里选一个已连接平台。</div>`);
+      toast(`预览失败：${msg}`, "err");
+    }
     pvBtn.disabled = false;
+    pvBtn.textContent = label;
   });
   // 目标用户增删
   const proAdd = document.getElementById("pro-target-add");

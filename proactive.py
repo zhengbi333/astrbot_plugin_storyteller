@@ -800,12 +800,23 @@ class ProactiveManager:
         configured = str(self._config().get("proactive.session_platform", "aiocqhttp") or "aiocqhttp").strip()
         session = self._resolve_session(user)
         cur_platform = session.split(":", 1)[0] if session else configured
-        summary = "、".join(f"{p['id']}" + (f"（{p['name']}）" if p.get("name") else "") for p in platforms)
+        # 0.236：文案说人话——「阡墨（适配器 aiocqhttp）」比原来的「阡墨（aiocqhttp）」明确得多，
+        # 并讲清这里要填的是**平台标识**（会话前缀用的就是它），不是适配器类型。
+        summary = "、".join(
+            f"{p['id']}（适配器 {p.get('name') or '未知'}）" for p in platforms
+        )
         if cur_platform in ids:
             return False, f"发送接口返回失败（目标会话平台 '{cur_platform}' 已连接，但发送未成功：适配器未连接/目标不可达？）"
-        # 自动回退：配置前缀不在已连接平台中，且恰好只有一个平台（唯一适配器，回退回不到别处）
+        # 自动回退候选：① 只有一个平台（唯一适配器，回退回不到别处）
+        #               ② 配置值其实是**适配器类型**且该类型只有一个实例（如填了 aiocqhttp，而只有一个 aiocqhttp 实例）
+        alt = ""
         if len(platforms) == 1:
             alt = platforms[0]["id"]
+        else:
+            same_name = [p["id"] for p in platforms if str(p.get("name") or "") == cur_platform]
+            if len(same_name) == 1:
+                alt = same_name[0]
+        if alt:
             alt_session = f"{alt}:FriendMessage:{user.split(':')[-1].strip().lstrip('@')}"
             logger.warning(
                 "[Storyteller] 主动发送前缀 %s 未匹配已连接平台 %s，自动回退用 %s 尝试一次",
@@ -818,10 +829,20 @@ class ProactiveManager:
                     if ok:
                         logger.info("[Storyteller] 主动消息已用平台 %s 发送（原配置 %s 已自动回退）", alt, configured)
                         return True, ""
-                    return False, f"发送接口返回失败（已连接平台: {summary}）"
+                    return False, (
+                        f"发送接口返回失败（已回退用 {alt} 仍失败；已连接平台: {summary}）"
+                    )
             except Exception as exc:
                 logger.warning("[Storyteller] 回退平台发送异常: %s", exc)
-        return False, f"发送接口返回失败：配置的平台前缀 '{cur_platform}' 未匹配已连接平台（已连接: {summary}；请在主动页把「消息平台前缀」设为实际平台，默认 QQ=aiocqhttp）"
+        known_names = {str(p.get("name") or "") for p in platforms}
+        extra = ""
+        if cur_platform in known_names:
+            extra = (f"「{cur_platform}」是适配器**类型**，不是平台标识；")
+        return False, (
+            f"发送接口返回失败：平台前缀 '{cur_platform}' 未匹配已连接平台。"
+            f"{extra}「消息平台前缀」要填**平台标识**（会话前缀用的就是它，即括号前那个）：{summary}。"
+            f"请在「主动」页的下拉里选一个（已连接 {len(platforms)} 个平台，无法自动判断选哪个）。"
+        )
 
     def _resolve_session(self, user: str) -> str:
         """把目标用户解析为 unified_msg_origin 会话（0.150：容忍用户填带平台前缀/空格的用户 ID）。

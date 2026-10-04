@@ -289,6 +289,12 @@
         "default": true,
         "hint": "检测到「约定/答应/以后要」等消息时，用 LLM 提炼成一条承诺记忆写入【为你篆刻的历史】插件。"
       },
+      "self_commitment_enabled": {
+        "description": "记住自己答应的事",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，它自己说出的承诺（如「明天整理好发你」「回头帮你查」）会单独写成一条 promise 记忆——这类话最容易被忘掉。只在这种「时间词+动作词」同时出现时才调用模型确认，平时零开销。"
+      },
       "profile_enabled": {
         "description": "提炼用户画像",
         "type": "bool",

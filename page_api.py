@@ -1524,7 +1524,44 @@ class StorytellerWebApi:
             scope = "开启" if silence_mod.context_enabled(plugin.config) else "关闭"
             return True, f"沉默判定可用（连续上限 {limit} 次；情境注入 {scope}）"
 
+        def proactive_platform_status() -> tuple[bool, str]:
+            """只读：主动发送的平台前缀是否匹配 AstrBot 已连接平台（0.236 新增）。
+
+            这一项正是「清障一键全过、但主动消息发不出去」的漏检点：此前自检只看开关与目标用户，
+            从不校验平台前缀；而会话身份用的 platform **id**（用户给实例起的名字）与适配器类型
+            完全是两回事，填错就会在真正发送时才暴露。
+            """
+            manager = getattr(plugin, "proactive", None)
+            if manager is None:
+                return False, "主动模块未初始化"
+            if not plugin.config.bool("proactive.enabled", True):
+                return True, "主动对话已在配置里关闭（不发送，无需检查平台）"
+            targets = manager.target_users()
+            if not targets:
+                return True, "未配置目标用户（不发送，无需检查平台）"
+            try:
+                platforms = manager._connected_platforms()
+            except Exception as exc:
+                return False, "已连接平台读取失败：" + type(exc).__name__
+            if not platforms:
+                return False, "未检测到已连接平台适配器（AstrBot 里没有已连接的平台）"
+            configured = str(plugin.config.get("proactive.session_platform", "") or "").strip()
+            session = manager._resolve_session(targets[0]) or ""
+            cur = session.split(":", 1)[0] if session else configured
+            ids = [x["id"] for x in platforms]
+            if cur in ids:
+                return True, f"平台前缀「{cur}」已连接 ✓（目标 {targets[0]}）"
+            same_name = [x["id"] for x in platforms if str(x.get("name") or "") == cur]
+            if len(same_name) == 1:
+                return True, f"前缀「{cur}」是适配器类型；唯一实例「{same_name[0]}」会在发送失败时自动回退 ✓"
+            names = "、".join(f"{x['id']}（适配器 {x.get('name') or '未知'}）" for x in platforms)
+            return False, (
+                f"前缀「{cur}」不匹配任何已连接平台 → 主动消息会发送失败。"
+                f"请到「主动」页把「消息平台前缀」选成**平台标识**（已连接：{names}）"
+            )
+
         add("intercept", "拦截与模板", "拦截模式与模板能否正常渲染", intercept_status)
+        add("proactive_platform", "主动 · 发送平台", "主动消息的平台前缀是否匹配已连接平台", proactive_platform_status)
         add("silence", "智能沉默", "沉默判定开关、连续上限与情境注入", silence_gate_status)
         add("debounce", "消息防抖", "防抖开启时合并器是否就位", debounce_status)
         add("rewrite", "润色", "润色开关与模板是否配套", rewrite_status)

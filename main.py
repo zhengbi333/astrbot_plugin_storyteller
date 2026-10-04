@@ -34,8 +34,10 @@ from .memory import (
     build_profile_prompt,
     build_session_context,
     classify_remember,
+    build_self_commitment_prompt,
     detect_commitment,
     detect_profile,
+    detect_self_commitment,
     parse_profile_items,
     write_memory,
 )
@@ -215,7 +217,9 @@ class StorytellerPlugin(Star):
         self._memory_managed_active = False
         self._image_wish_cache: dict[str, tuple[str, float]] = {}  # 0.183：会话 -> ({生图意愿} 标记文本, 时间戳)
         self._search_result_cache: dict[str, tuple[str, str, float]] = {}  # 0.189：会话 -> ({搜索结果} 标记文本, 查询词, 时间戳)
-        self._memory_written_cache: dict[str, tuple[str, str, float, str]] = {}  # 0.191：会话 -> (已写入内容, 类型, 时间戳, 原文key)
+        self._memory_written_cache: dict[str, tuple[str, str, float, str]] = {}
+        # 0.236：会话 -> (已写入的自我承诺, 时间戳, 原文) —— 同一条话 10 分钟内只写一次
+        self._self_commitment_cache: dict[str, tuple[str, float, str]] = {}  # 0.191：会话 -> (已写入内容, 类型, 时间戳, 原文key)
         # 0.194：生成中状态（打断 + 合并重新理解）——会话 -> {"started","pending","restarts","mode","first_text"}
         self._inflight: dict[str, dict[str, Any]] = {}
         self._silence_streak: dict[str, int] = {}  # 0.195：连续沉默计数（防止判定误伤导致一直不理人）
@@ -2466,6 +2470,9 @@ class StorytellerPlugin(Star):
                     content = _polished_text
             # 0.204 思绪留档：用**最终要发出去的文本**留档（判定改成短句时记那句短的）
             self._save_inner_archive(session_id, event, content, _last_inner, _inner_picked)
+            # 0.236：这句是"我说出去的"——若里面含对未来的承诺（明天整理好发你），
+            # 单独记住它，否则第二天就忘了（用户实测：这类话此前完全没人记）。
+            self._maybe_note_self_commitment(event, content)
             # 表情包标记：贴在最终文字末尾（判定把它改成短句时标记也不丢）
             if content and _emoji_mark and _emoji_mark not in content:
                 content = f"{content} {_emoji_mark}"
@@ -3065,6 +3072,9 @@ class StorytellerPlugin(Star):
                 if not final_text:
                     # LLMResponse 可能同时带原始 result_chain；沉默必须一起清掉。
                     resp.result_chain = None
+                else:
+                    # 0.236：主链路径同样记住"自己答应过的事"
+                    self._maybe_note_self_commitment(event, final_text)
         except Exception as exc:
             logger.warning("[Storyteller] 回复链路处理异常: %s", exc)
 
@@ -3522,6 +3532,72 @@ class StorytellerPlugin(Star):
                 logger.info("[Storyteller] 已写入记忆: type=%s %s", note_type, content[:60])
         except Exception as exc:
             logger.warning("[Storyteller] 写入记忆失败: %s", exc)
+        return memory_id
+
+    def _maybe_note_self_commitment(self, event: AstrMessageEvent, text: str) -> None:
+        """0.236：轻量命中「我自己答应过的事」就后台写一条 promise 记忆（不阻塞回复）。"""
+        try:
+            if not self.config.bool("memory.self_commitment_enabled", True):
+                return
+            snippet = (text or "").strip()
+            if not snippet or not detect_self_commitment(snippet):
+                return
+            asyncio.ensure_future(self._write_self_commitment(event, snippet))
+        except Exception as exc:
+            logger.debug("[Storyteller] 自我承诺检测跳过: %s", exc)
+
+    async def _write_self_commitment(self, event: AstrMessageEvent, text: str) -> str:
+        """0.236：把「我刚刚答应对方的事」写进长期记忆（promise），返回 memory_id。
+
+        与 _write_commitment 的区别：那个处理「对方要我记住什么」，这个处理「**我自己答应了什么**」。
+        - 复用 memory.commitment 的模型名额（build_self_commitment_prompt 换成"从我的话里提炼承诺"口径）；
+        - 幂等：同会话 10 分钟内相同原文只写一次；
+        - 失败静默（只是少记一条，不该影响回复）。
+        """
+        memory_id = ""
+        try:
+            bridge = self._get_memory_bridge()
+            if bridge is None:
+                return ""
+            session_id = str(getattr(event, "unified_msg_origin", "") or "")
+            raw_key = (text or "").strip()
+            cached = self._self_commitment_cache.get(session_id) if session_id else None
+            if cached and time.time() - cached[1] <= 600 and cached[2] == raw_key:
+                return ""
+            from .models import resolve_chat_provider as _resolve_self
+
+            provider, _pid = _resolve_self(self.context, self.config, "commitment")
+            if provider is None:
+                return ""
+            resp = await chat_text(
+                provider,
+                self.config,
+                prompt=build_self_commitment_prompt(text),
+                session_id="storyteller_self_commitment",
+            )
+            raw = str(getattr(resp, "completion_text", "") or "").strip()
+            content = ""
+            if raw:
+                from .json_util import parse_json_lenient
+
+                obj = parse_json_lenient(raw)
+                if isinstance(obj, dict):
+                    content = str(obj.get("content") or "").strip()
+                elif raw.startswith("{"):
+                    content = ""
+                else:
+                    content = raw
+            if not content or content.startswith(("（", "【", "[")):
+                # 没有承诺 / 模型回了说明性文字 → 不写
+                return ""
+            memory_id = await write_memory(
+                bridge, content=content, memory_type="promise", event=event, importance=0.7
+            )
+            if memory_id and session_id:
+                self._self_commitment_cache[session_id] = (content, time.time(), raw_key)
+                logger.info("[Storyteller] 已记住自己的承诺: %s", content[:70])
+        except Exception as exc:
+            logger.warning("[Storyteller] 记住自己的承诺失败: %s", exc)
         return memory_id
 
     def _memory_confirm_hint(self, session_id: str) -> str:
