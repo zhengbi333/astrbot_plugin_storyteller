@@ -607,7 +607,11 @@ _register(Capability(
 _register(Capability(
     name="emoji_send",
     title="发一张表情包",
-    description="从图库挑一张表情包随回复发出（想表达情绪时用）",
+    description=(
+        "从图库挑一张表情包随本条回复发出。"
+        "对方明确要表情包/要图时**必须调用本工具**；也可以在你觉得该配一张时主动用。"
+        "不要只在文字里写「给你发了/甩过去一张」——那只在文字里，用户收不到图。"
+    ),
     params={"category": "可选，分类标题；不给则用第一个有图的分类"},
     example='[DO:emoji_send]{"category":"表达轻微吐槽"}',
     daily_limit_key="capabilities.emoji_send_daily",
@@ -803,11 +807,34 @@ def build_declaration(plugin: Any, mode: str, *, brief: bool = False) -> str:
     caps = available_capabilities(plugin, mode)
     if not caps:
         return ""
+    # 0.237：图库为空时明确告知（避免模型"描述了发图"却根本发不出来）。
+    # 实测（用户朋友）：对方要表情包，模型回「随手甩过去一张…jpg）喏」但没调用工具，
+    # 用户什么都没收到 —— 泛泛的"别只在嘴上答应"它不听，得把发图这件事说具体。
+    _empty_gallery = ""
+    try:
+        _store = getattr(plugin, "emoji_store", None)
+        if _store is not None and not any(
+            _store._files(str(c.get("id") or "")) for c in _store.categories()
+        ):
+            _empty_gallery = (
+                "【图库为空】现在没有任何表情包/图片可用——不要描述发图、也不要答应发图片。"
+            )
+    except Exception:
+        _empty_gallery = ""
+    _image_rule = (
+        "【发图必须真的调用工具】想发表情包/图片时只能靠工具发出，"
+        "**不能只在文字里描述**（写「给你发了一张」而没调用工具 = 用户什么都没收到）。"
+        "对方明确索要表情包时，务必调用发图工具。"
+    )
     if brief:
+        # 原生工具模式下**不追加 _image_rule**：规则已写进 emoji_send 的工具描述
+        # （工具 schema 本来就要发过去，不额外占 system）。0.206 好不容易把这段压到 ~150 字，
+        # 这里只加"图库为空"这条**状态相关**的短提示（且仅在图库确实为空时出现）。
         return (
             "【能做的事】需要真的做点什么时（记住、查资料、画图、改日程/穿搭、发表情、翻记录、"
             "记待办、回想自己想过什么…），直接调用对应工具去做；只有工具返回成功才算做到了，"
             "别只在嘴上答应。不需要做事时正常说话就好。"
+            + (("\n" + _empty_gallery) if _empty_gallery else "")
         )
     lines = [
         "【你可以主动做的事】（想做的时候，在回复里按格式写出下面这种标记，"
@@ -819,6 +846,9 @@ def build_declaration(plugin: Any, mode: str, *, brief: bool = False) -> str:
         "格式：[DO:能力名]{\"参数\":\"值\"}——标记本身不会发给对方，你可以在它前后正常说话。"
         "不需要做的事就不要写标记；一次最多两个。"
     )
+    lines.append(_image_rule)
+    if _empty_gallery:
+        lines.append(_empty_gallery)
     return "\n".join(lines)
 
 

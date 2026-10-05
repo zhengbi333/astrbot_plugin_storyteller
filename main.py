@@ -2476,6 +2476,8 @@ class StorytellerPlugin(Star):
             # 表情包标记：贴在最终文字末尾（判定把它改成短句时标记也不丢）
             if content and _emoji_mark and _emoji_mark not in content:
                 content = f"{content} {_emoji_mark}"
+            # 0.237：模型只在文字里"说"发了表情包/图（没调用工具）→ 这里真的补一张
+            content = self._maybe_fulfill_sticker_narration(event, content)
             # 0.197 保险：最终文本再剔一次能力标记（任何分支都不该把 [DO:...] 发给用户）
             if content:
                 try:
@@ -3075,6 +3077,9 @@ class StorytellerPlugin(Star):
                 else:
                     # 0.236：主链路径同样记住"自己答应过的事"
                     self._maybe_note_self_commitment(event, final_text)
+                    # 0.237：主链路径同样兜底"说了发图却没发"
+                    final_text = self._maybe_fulfill_sticker_narration(event, final_text)
+                    resp.completion_text = final_text
         except Exception as exc:
             logger.warning("[Storyteller] 回复链路处理异常: %s", exc)
 
@@ -3533,6 +3538,56 @@ class StorytellerPlugin(Star):
         except Exception as exc:
             logger.warning("[Storyteller] 写入记忆失败: %s", exc)
         return memory_id
+
+    def _maybe_fulfill_sticker_narration(self, event: AstrMessageEvent, content: str) -> str:
+        """0.237：回复"声称发了表情包/图"但本轮实际没发 → 从图库补一张（返回可能带标记的文本）。
+
+        只在该动作**本可以做到**时补：图库有图、未开启表情包 opt-out、且回复里尚无表情包标记。
+        图库为空时记一条日志（此时无法补发，属于配置问题，面板会提示去上传）。
+        """
+        try:
+            text = str(content or "")
+            if not text:
+                return content
+            if not self.config.bool("emoji.enabled", True):
+                return content
+            store = getattr(self, "emoji_store", None)
+            if store is None or store.has_placeholder(text):
+                return content
+            from .emoji import looks_like_sticker_narration
+
+            if not looks_like_sticker_narration(text):
+                return content
+            user = ""
+            try:
+                from .persona import extract_sender
+
+                user = extract_sender(event).get("user_id") or ""
+            except Exception:
+                user = ""
+            try:
+                if user and store.is_opt_out(user):
+                    return content
+            except Exception:
+                pass
+            try:
+                cats = [c for c in store.categories() if store._files(str(c.get("id") or ""))]
+            except Exception:
+                cats = []
+            if not cats:
+                logger.info(
+                    "[Storyteller] 回复里描述了发表情包，但图库为空无法补发（去面板上传表情包）: session=%s",
+                    getattr(event, "unified_msg_origin", ""),
+                )
+                return content
+            title = str(cats[0].get("title") or "").strip()
+            if not title:
+                return content
+            logger.info("[Storyteller] 回复声称发了表情包但实际未发送 → 已自动补发一张（分类 %s）", title)
+            return f"{text} [EMOJI:{title}]"
+        except Exception as exc:
+            logger.debug("[Storyteller] 表情包补发兜底跳过: %s", exc)
+            return content
 
     def _maybe_note_self_commitment(self, event: AstrMessageEvent, text: str) -> None:
         """0.236：轻量命中「我自己答应过的事」就后台写一条 promise 记忆（不阻塞回复）。"""

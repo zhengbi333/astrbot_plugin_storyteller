@@ -20,6 +20,44 @@ EMOJI_PATTERN = re.compile(r"\[EMOJI:([^\]]+)\]")
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
+# 0.237：模型"嘴上说发了图/表情包"但没真的调用工具 —— 实测（用户朋友）：
+# 对方要表情包，模型回「随手甩过去一张刚存的"猫猫炸毛"jpg）喏」，却没有任何工具调用，
+# 用户什么都没收到；而真正发出的那张是**表情包判定**这条正常流程后续补的。
+# 下面这个检测用于兜底补发（见 main._maybe_fulfill_sticker_narration）。
+_NARRATION_VERB = r"(?:甩|扔|丢|发|递|塞|传)"
+_NARRATION_IMAGE = r"(?:表情包|表情|图片|图|jpg|jpeg|png|gif|截图)"
+STICKER_NARRATION_RE = re.compile(
+    r"(?:"
+    + _NARRATION_VERB + r"(?:过去|出去|给你|你一张|了)[^。！？]{0,20}" + _NARRATION_IMAGE
+    + r"|(?:已经|刚刚|刚|顺手|随手)[^。！？]{0,8}" + _NARRATION_VERB + r"[^。！？]{0,16}" + _NARRATION_IMAGE
+    # 「我把截图发给你了」这类**图在前、动词在后**的句式（实测曾漏判）
+    + r"|" + _NARRATION_IMAGE + r"[^。！？]{0,8}" + _NARRATION_VERB + r"(?:给你|给你了|过去|出去|你了|你)"
+    + r")"
+)
+# 「回头/下次/明天/待会」这类**未来**说法不算"已经发了"（那是承诺，另有承诺识别负责）
+_NARRATION_FUTURE_RE = re.compile(
+    r"回头|下次|改天|明天|后天|待会|待会儿|等会|等下|之后|以后|要是|如果|等你有空"
+)
+
+
+def looks_like_sticker_narration(text: str) -> bool:
+    """回复是否在"声称已经发出表情包/图片"，但实际没有发送动作。
+
+    逐句判定：同一句里同时出现「已完成的发送动词」与「图片类名词」才算；
+    句中带未来词（回头/下次/明天…）则跳过——那是承诺，不是"已经发了"。
+    """
+    clean = (text or "").strip()
+    if not clean or len(clean) > 500:
+        return False
+    for sentence in re.split(r"[。！？\n]", clean):
+        piece = sentence.strip()
+        if not piece or _NARRATION_FUTURE_RE.search(piece):
+            continue
+        if STICKER_NARRATION_RE.search(piece):
+            return True
+    return False
+
+
 class EmojiStore:
     """表情包图库管理 + 发送策略（去重 / 反馈权重 / 用户可关）。"""
 
