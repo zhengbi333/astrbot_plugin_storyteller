@@ -977,6 +977,11 @@ async def _dispatch_locked(plugin: Any, event: Any, name: str, payload: dict) ->
             day = _t.strftime("%Y-%m-%d", _t.localtime())
             key = f"{name}:{day}"
             plugin._cap_usage[key] = int(plugin._cap_usage.get(key, 0)) + 1
+            # 0.238：每日用量落盘，重启不会把当日限额"清零"（否则可被重启绕过）
+            try:
+                plugin._mark_runtime_dirty()
+            except Exception:
+                pass
         try:
             done = getattr(event, "_storyteller_caps_done", None)
             if not isinstance(done, set):

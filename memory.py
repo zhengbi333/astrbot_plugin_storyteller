@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .persona import extract_sender
@@ -136,6 +137,62 @@ def detect_profile(text: str) -> bool:
     if len(clean) < 4 or len(clean) > 200:
         return False
     return any(hint in clean for hint in PROFILE_HINTS)
+
+
+# 0.238：判断「一件约定的事是否已经在对话里了结」——用于主动由头过滤。
+# 实测（用户朋友）：18:36 对话里白猫画已经"画好 + 对方看过"，21:22 主动消息却仍以它为由头
+# 汇报进度（「画完那只猫了…」），对方反馈"我们已经说过这个话题了"。
+_SETTLE_STRONG = (
+    "画好", "写好", "做完", "弄完", "弄好", "搞定", "做好", "完成", "查完", "问完",
+    "处理好", "改好", "看过", "看到", "收到", "发过去", "发给我", "发了你", "发出",
+)
+_SETTLE_FUTURE = re.compile(r"回头|下次|改天|明天|后天|待会|待会儿|等会|等下|之后|以后|还没|没有|要是|如果")
+
+
+def _bigrams(text: str) -> set[str]:
+    """去标点空白后的字符二元组集合（够粗、够稳，用于中文字面重合度）。"""
+    clean = re.sub(r"[\s\W_]+", "", str(text or ""))
+    if len(clean) < 2:
+        return set()
+    return {clean[i : i + 2] for i in range(len(clean) - 1)}
+
+
+def promise_settled(
+    promise_text: str, recent_texts: list[str], *, min_shared: int = 3, ratio: float = 0.25
+) -> tuple[bool, str]:
+    """这件约定的事，是否已经在最近对话里了结（办完/看过/收到）。
+
+    **两级判定**（真实对话是跨句完成的，"画好了"和细节常不在同一句）：
+    1. 主题级：整段最近对话与约定文本的字符二元组交集够多（≥ min_shared，或占约定 ≥ ratio）
+       ——说明这件事确实被谈到了；
+    2. 完成级：对话里**存在一句**同时满足「与约定沾边」+「带完成/收到类标记」+「不是未来时」
+       （「回头给你」「还没画完」「明天就画好了」都不算子结）。
+    返回 (是否已了结, 证据句)。
+    """
+    p = _bigrams(promise_text)
+    if not p:
+        return False, ""
+    texts = [str(x or "") for x in (recent_texts or []) if str(x or "").strip()]
+    if not texts:
+        return False, ""
+    # —— 第 1 级：主题是否出现在最近对话里
+    shared_all = p & _bigrams("\n".join(texts))
+    if len(shared_all) < min_shared and len(shared_all) / max(1, len(p)) < ratio:
+        return False, ""
+    # —— 第 2 级：是否存在"完成句"
+    for raw in texts:
+        for sentence in re.split(r"[。！？\n]", raw):
+            piece = sentence.strip()
+            if len(piece) < 4:
+                continue
+            if _SETTLE_FUTURE.search(piece):
+                continue
+            if not any(mark in piece for mark in _SETTLE_STRONG):
+                continue
+            if not (p & _bigrams(piece)):
+                continue  # 这一句得跟约定沾边，避免"好的，收到"这类通用句误判
+            return True, piece[:60]
+    return False, ""
 
 
 def has_future_action(text: str) -> bool:

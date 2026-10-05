@@ -15,7 +15,9 @@
 
 from __future__ import annotations
 
+import json
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from .log import logger
@@ -88,6 +90,7 @@ class Inspiration:
         window_end: float | None = None,
         user: str = "",
         can_delay: bool = True,
+        cooldown_days: float = 0.0,
     ):
         self.source = source
         self.text = str(text or "")[:300]
@@ -96,6 +99,8 @@ class Inspiration:
         self.window_end = window_end
         self.user = user
         self.can_delay = can_delay
+        # 0.238：>0 时同一条由头在这段时间内不再重复（约定类用 2 天，避免"隔天又当新闻报"）
+        self.cooldown_days = max(0.0, float(cooldown_days or 0.0))
         self.state = "brewing"  # brewing 酝酿 | ready 可提 | raised 已提 | sleeping 沉睡
         self.created_at = _now()
 
@@ -122,6 +127,49 @@ class InspirationEngine:
         self._plugin = plugin
         self._registered: dict[str, Callable[[Any], list[dict[str, Any]]]] = {}
         self._meta: dict[str, Any] = {"used_pairs": {}, "daypart_sent": {}}
+        # 0.238：登记表必须落盘——此前只存内存，重启后"已提过/已结项"全部复活，
+        # 于是同一条约定隔天（或重载后）又被拿出来说一遍（用户实测反馈）。
+        self._load_meta()
+
+    # ---- 登记表持久化（0.238） ----
+    def _meta_file(self) -> Path | None:
+        try:
+            base = getattr(self._plugin, "data_dir", None)
+            if base is None:
+                return None
+            folder = Path(base)
+            folder.mkdir(parents=True, exist_ok=True)
+            return folder / "inspiration_meta.json"
+        except Exception:
+            return None
+
+    def _load_meta(self) -> None:
+        path = self._meta_file()
+        if path is None or not path.exists():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8") or "{}")
+            if isinstance(raw, dict):
+                for key, value in raw.items():
+                    if isinstance(value, dict):
+                        self._meta[key] = value
+        except Exception:
+            pass
+
+    def _save_meta(self) -> None:
+        path = self._meta_file()
+        if path is None:
+            return
+        try:
+            # 只裁「按天」的两张表（保留 14 天）；结项与提过次数属长期状态，全量保留
+            cutoff = time.strftime("%Y-%m-%d", time.localtime(_now() - 14 * 86400))
+            for key in ("used_pairs", "daypart_sent"):
+                book = self._meta.get(key)
+                if isinstance(book, dict):
+                    self._meta[key] = {k: v for k, v in book.items() if str(k) >= cutoff}
+            path.write_text(json.dumps(self._meta, ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception:
+            pass
 
     # ---- 登记接口（为未来模块留缝） ----
     def register_source(self, name: str, provider: Callable[[Any], list[dict[str, Any]]]) -> None:
@@ -137,10 +185,45 @@ class InspirationEngine:
         day = _today()
         self._meta.setdefault("used_pairs", {}).setdefault(day, {})
         self._meta["used_pairs"][day][self._persist_key(user, text)] = _now()
+        # 0.238：另记长期时间戳，供约定类由头跨天冷却
+        self._meta.setdefault("used_long", {})[self._persist_key(user, text)] = _now()
+        self._save_meta()
 
     def already_raised_today(self, user: str, text: str) -> bool:
         day = _today()
         return self._persist_key(user, text) in (self._meta.get("used_pairs") or {}).get(day, {})
+
+    # ---- 约定由头的"消化"登记（0.238：发出去即算处理过，别一直重复） ----
+    def promise_raise_count(self, user: str, text: str) -> int:
+        return int((self._meta.get("promise_raises") or {}).get(self._persist_key(user, text), 0) or 0)
+
+    def note_promise_raised(self, user: str, text: str) -> int:
+        """记一次"这条约定已被主动提起"，返回累计次数。"""
+        book = self._meta.setdefault("promise_raises", {})
+        key = self._persist_key(user, text)
+        book[key] = int(book.get(key, 0) or 0) + 1
+        self._save_meta()
+        return book[key]
+
+    def mark_promise_settled(self, user: str, text: str) -> None:
+        """结项：此后不再作为主动由头（用户要求"完成后就别再重复"）。"""
+        self._meta.setdefault("settled_promises", {})[self._persist_key(user, text)] = _now()
+        self._save_meta()
+
+    def promise_is_settled(self, user: str, text: str) -> bool:
+        return self._persist_key(user, text) in (self._meta.get("settled_promises") or {})
+
+    def raised_recently(self, user: str, text: str, *, days: float = 2.0) -> bool:
+        """0.238：这段时间内是否已用同一条由头主动说过（跨天冷却）。
+
+        原来的去重只看"当天"，于是同一条约定隔天又能被拿出来说一遍——实测反馈
+        「她为啥还在发这个」。约定类由头现在要求更长的冷却。
+        """
+        last = (self._meta.get("used_long") or {}).get(self._persist_key(user, text))
+        try:
+            return bool(last) and (_now() - float(last)) < days * 86400
+        except Exception:
+            return False
 
     def _note_daypart_sent(self, bucket: str, user: str) -> None:
         day = _today()
@@ -192,6 +275,10 @@ class InspirationEngine:
         for ins in out:
             if self.already_raised_today(ins.user, ins.text):
                 ins.state = "sleeping"
+            elif getattr(ins, "cooldown_days", 0) and self.raised_recently(
+                ins.user, ins.text, days=float(ins.cooldown_days)
+            ):
+                ins.state = "sleeping"
             elif ins.in_window():
                 ins.state = "ready"
             else:
@@ -225,7 +312,8 @@ class InspirationEngine:
             getter = getattr(plugin, "_recent_promise_hint", None)
             mem = getter(limit=4, session_context=session_context) if callable(getter) and session_context else ""
             if mem:
-                out.append(Inspiration("记忆", f"还记得约好的事：{mem[:120]}", importance=0.5))
+                out.append(Inspiration("记忆", f"还记得约好的事：{mem[:120]}", importance=0.5,
+                                       cooldown_days=2.0))
         except Exception:
             pass
         # 见闻 / 梦
@@ -267,7 +355,8 @@ class InspirationEngine:
             getter = getattr(plugin, "_recent_promise_hint", None)
             mem = getter(limit=3, session_context=session_context) if callable(getter) and session_context else ""
             if mem:
-                out.append(Inspiration("约定后续", f"之前说好/约好的事：{mem[:120]}", importance=0.6))
+                out.append(Inspiration("约定后续", f"之前说好/约好的事：{mem[:120]}", importance=0.6,
+                                       cooldown_days=2.0))
         except Exception:
             pass
         return out

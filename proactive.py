@@ -118,6 +118,21 @@ class ProactiveManager:
             sent = raw.get("last_sent")
             if isinstance(sent, dict):
                 self._last_sent = {str(k): float(v or 0) for k, v in sent.items()}
+            # 0.238：以下四项此前只在内存里 —— 重启后 "刚聊完顺延" 与
+            # 「对方是否回应过」的判断同时失效（last_reply=0 → 误判对方没回，
+            # 于是把间隔越拉越长），面板的已发送/候选记录也会清空。
+            last_it = raw.get("last_interaction")
+            if isinstance(last_it, dict):
+                self._last_interaction = {str(k): float(v or 0) for k, v in last_it.items()}
+            per_user = raw.get("daily_per_user")
+            if isinstance(per_user, dict):
+                self._daily_per_user = {str(k): int(v or 0) for k, v in per_user.items()}
+            hist = raw.get("sent_history")
+            if isinstance(hist, list):
+                self._sent_history = [x for x in hist if isinstance(x, dict)][:200]
+            cands = raw.get("candidates")
+            if isinstance(cands, list):
+                self._candidates = [x for x in cands if isinstance(x, dict)][:200]
         except Exception:
             pass
 
@@ -133,8 +148,18 @@ class ProactiveManager:
             daily = {k: v for k, v in self._daily_count.items() if str(k) >= cutoff}
             self._daily_count = daily
             path.write_text(
-                _json.dumps({"daily": daily, "last_sent": self._last_sent},
-                            ensure_ascii=False, indent=1),
+                _json.dumps(
+                    {
+                        "daily": daily,
+                        "last_sent": self._last_sent,
+                        "last_interaction": self._last_interaction,
+                        "daily_per_user": self._daily_per_user,
+                        "sent_history": list(self._sent_history)[:200],
+                        "candidates": list(self._candidates)[:200],
+                    },
+                    ensure_ascii=False,
+                    indent=1,
+                ),
                 encoding="utf-8",
             )
         except Exception:
@@ -420,7 +445,7 @@ class ProactiveManager:
                 return
             cand = fallback
         # 边界通过后才进入生成
-        ok, reason = self._should_send(user, bucket=daypart_bucket(), cand=cand)
+        ok, reason = self._should_send(user, bucket=daypart_bucket(), cand=cand, force=force)
         if not ok:
             self._record_candidate(
                 {"user": user, "outcome": "blocked", "reason": reason,
@@ -494,11 +519,22 @@ class ProactiveManager:
                 except Exception:
                     pass
             logger.info("[Storyteller] 主动消息已发送: user=%s byhead=%s text=%s", user, cand.source, text[:60])
+            # 0.238：这条由头已经真的发出去了 = 这件事被处理过一次 →
+            # 约定类由头减权；提过两次即结项，避免"一直重复同一件事"（用户明确要求）。
+            if str(getattr(cand, "source", "")) in ("记忆", "约定后续"):
+                settler = getattr(self._plugin, "_settle_proactive_promise", None)
+                if callable(settler):
+                    try:
+                        await settler(user, cand.text or "", session_context)
+                    except Exception as exc:
+                        logger.warning("[Storyteller] 消化由头失败（忽略）: %s", exc)
         else:
             # 发送失败不消耗由头（下轮重试同由头）
             logger.warning("[Storyteller] 主动消息发送失败: user=%s reason=%s", user, send_reason)
 
-    def _should_send(self, user: str, *, bucket: str = "day", cand: Any = None) -> tuple[bool, str]:
+    def _should_send(
+        self, user: str, *, bucket: str = "day", cand: Any = None, force: bool = False
+    ) -> tuple[bool, str]:
         # 静默闸门（优先于每日上限）：道理同「一个人被晾着晾了太久，自然就不再往上凑」
         silenced = self._silence_blocked(user)
         if silenced:
@@ -511,10 +547,11 @@ class ProactiveManager:
         quiet = str(self._config().get("proactive.quiet_hours", "23:00-08:30") or "").strip()
         if quiet and self._in_quiet_hours(quiet):
             return False, f"免打扰时段（{quiet}）不打扰"
-        # 刚聊完顺延
+        # 刚聊完顺延（0.238：面板「立即尝试一次」是手动动作，force=True 时不受此时限；
+        # 其余门槛——免打扰/每日上限/静默闸门——仍然生效，手动也不该半夜炸醒对方）
         cooldown = max(0, self._config().int("proactive.cooldown_after_chat_minutes", 30))
         last_chat = self._last_interaction.get(user)
-        if last_chat and _now_ts() - last_chat < cooldown * 60:
+        if not force and last_chat and _now_ts() - last_chat < cooldown * 60:
             return False, f"刚聊完 {cooldown} 分钟内不打扰"
         # 0.231：显式的「最短间隔」门。此前最短间隔只靠 run_loop 的睡眠隐式保证，
         # 一旦有别的入口（启动补检 / 面板手动触发 / 重载后重排）就会绕过它。
@@ -707,6 +744,13 @@ class ProactiveManager:
             # 0.212：两条实测出来的约束——
             # ① 长度：主动开场白原来普遍 30~50 字（见闻/梦那类还会更长），不像"随手发一条"；
             # ② 别复述：见闻类由头是新闻摘要（90+ 字），模型会原样播报标题，看着像新闻联播。
+            # 0.238：实测两条"不像人"的来源——
+            # ① 拿已经办完/已经聊过的事当新闻重报（对方："我们已经说过这个话题了"）；
+            # ② 用"汇报自己进度"的口吻开场（"我把X做完了…"），像工作汇报不像找人说话。
+            "★ 先对照：由头若与下面「你们最近聊到」重复（已经聊过、已经办完、对方已经回应过），"
+            "就不要再当新消息汇报——这条由头作废，宁可不说；",
+            "开口要面向**对方**：问一句、提一件对方关心的事、或分享一个能引出回应的小事；"
+            "不要用「我把X做完了/弄好了」这种汇报自己进度的开场；",
             "像随手发出去的一条消息：一两句、十几二十字就够，别写成一段话；",
             "由头只是「你为什么想起对方」，别把由头的内容原样复述出来"
             "（比如看到新闻，说「刚看到条新闻有点闹心」就够了，不用把标题念一遍）。",

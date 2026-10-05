@@ -213,6 +213,11 @@ def apply_decision(plugin: Any, event: Any, judged: Any, original: str) -> dict:
         streak = max(0, int(streaks.get(session_id, 0) or 0))
         if streak < limit:
             streaks[session_id] = streak + 1
+            # 0.238：沉默计数落盘，重启后"连续沉默上限"的保护不丢
+            try:
+                plugin._mark_runtime_dirty()
+            except Exception:
+                pass
             result.update(action="silence", text="")
             return result
         result["forced_reply"] = True

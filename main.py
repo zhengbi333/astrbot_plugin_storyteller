@@ -219,11 +219,18 @@ class StorytellerPlugin(Star):
         self._search_result_cache: dict[str, tuple[str, str, float]] = {}  # 0.189：会话 -> ({搜索结果} 标记文本, 查询词, 时间戳)
         self._memory_written_cache: dict[str, tuple[str, str, float, str]] = {}
         # 0.236：会话 -> (已写入的自我承诺, 时间戳, 原文) —— 同一条话 10 分钟内只写一次
-        self._self_commitment_cache: dict[str, tuple[str, float, str]] = {}  # 0.191：会话 -> (已写入内容, 类型, 时间戳, 原文key)
+        self._self_commitment_cache: dict[str, tuple[str, float, str]] = {}
+        # 0.238：运行态落盘（此前只在内存，重启即失）——含连续沉默计数、能力每日用量。
+        # 节流写盘，terminate 时兜底刷一次；**加载必须放在被它填充的两个属性之后**，
+        # 否则会被下面 `_silence_streak` / `_cap_usage` 的初始化覆盖掉（本轮实测踩到过）。
+        self._runtime_state_path = self.data_dir / "runtime_state.json"
+        self._runtime_dirty = False
+        self._runtime_saved_at = 0.0
         # 0.194：生成中状态（打断 + 合并重新理解）——会话 -> {"started","pending","restarts","mode","first_text"}
         self._inflight: dict[str, dict[str, Any]] = {}
         self._silence_streak: dict[str, int] = {}  # 0.195：连续沉默计数（防止判定误伤导致一直不理人）
         self._cap_usage: dict[str, int] = {}       # 0.197：能力每日用量（key = "能力:日期"）
+        self._load_runtime_state()
         self._cap_shared: dict[str, float] = {}    # 0.197：能力分享冷却（分享内心：同一条不重复念叨）
         self._native_tools_unsupported = False     # 0.200：提供方拒绝原生工具时置位 → 自动恢复正则兜底
         self._cap_log: list[dict] = []             # 0.201：能力调用日志（面板「能力清单」观测用）
@@ -3539,6 +3546,68 @@ class StorytellerPlugin(Star):
             logger.warning("[Storyteller] 写入记忆失败: %s", exc)
         return memory_id
 
+    # ------------------------------------------------------------ 运行态落盘（0.238）
+    def _load_runtime_state(self) -> None:
+        """读回重启前的运行态：连续沉默计数 / 能力每日用量 / 最近说出口的话。"""
+        try:
+            path = getattr(self, "_runtime_state_path", None)
+            if path is None or not path.exists():
+                return
+            import json as _json
+
+            raw = _json.loads(path.read_text(encoding="utf-8") or "{}")
+            if not isinstance(raw, dict):
+                return
+            streaks = raw.get("silence_streak")
+            if isinstance(streaks, dict):
+                self._silence_streak = {str(k): int(v or 0) for k, v in streaks.items()}
+            usage = raw.get("cap_usage")
+            if isinstance(usage, dict):
+                self._cap_usage = {str(k): int(v or 0) for k, v in usage.items()}
+            # 注：`_my_recent_replies`（口癖检查窗口）**有意不落盘**——
+            # 其注释写明"只看最近几轮，重启后重新积累即可"，故不纳入运行态。
+        except Exception as exc:
+            logger.debug("[Storyteller] 运行态读取失败（忽略）: %s", exc)
+
+    def _mark_runtime_dirty(self) -> None:
+        """标脏；距上次写盘 ≥20 秒才真写（避免每条消息都落盘）。"""
+        self._runtime_dirty = True
+        now = time.time()
+        if now - float(getattr(self, "_runtime_saved_at", 0.0) or 0.0) >= 20.0:
+            self._save_runtime_state()
+
+    def _save_runtime_state(self, *, force: bool = False) -> None:
+        try:
+            path = getattr(self, "_runtime_state_path", None)
+            if path is None:
+                return
+            if not force and not getattr(self, "_runtime_dirty", False):
+                return
+            import json as _json
+
+            # 只留最近 7 天的能力用量（key 形如 "能力:YYYY-MM-DD"）
+            cutoff = time.strftime("%Y-%m-%d", time.localtime(time.time() - 7 * 86400))
+            usage = {
+                k: v for k, v in (getattr(self, "_cap_usage", {}) or {}).items()
+                if (":" not in str(k)) or str(k).rsplit(":", 1)[-1] >= cutoff
+            }
+            self._cap_usage = usage
+            path.write_text(
+                _json.dumps(
+                    {
+                        "silence_streak": getattr(self, "_silence_streak", {}) or {},
+                        "cap_usage": usage,
+                    },
+                    ensure_ascii=False,
+                    indent=1,
+                ),
+                encoding="utf-8",
+            )
+            self._runtime_dirty = False
+            self._runtime_saved_at = time.time()
+        except Exception as exc:
+            logger.debug("[Storyteller] 运行态写盘失败（忽略）: %s", exc)
+
     def _maybe_fulfill_sticker_narration(self, event: AstrMessageEvent, content: str) -> str:
         """0.237：回复"声称发了表情包/图"但本轮实际没发 → 从图库补一张（返回可能带标记的文本）。
 
@@ -4065,6 +4134,8 @@ class StorytellerPlugin(Star):
             pass
 
     async def terminate(self):
+        # 0.238：退出前强制刷运行态（连续沉默计数 / 能力每日用量）
+        self._save_runtime_state(force=True)
         await self.proactive.stop()
         if getattr(self, "_mind_task", None) is not None:
             self._mind_task.cancel()
@@ -4566,6 +4637,108 @@ class StorytellerPlugin(Star):
         except Exception:
             return ""
 
+    def _recent_promise_items(self, limit: int = 4, *, session_context: dict | None = None) -> list[dict]:
+        """按条返回「未了结的约定/承诺」：[{"id","content","importance"}]（0.238）。
+
+        过滤三层：① 已在最近对话里了结的（promise_settled）；② 主动提起后已结项的（引擎登记表）。
+        """
+        bridge = self._get_memory_bridge()
+        if bridge is None:
+            return []
+        try:
+            lister = getattr(bridge, "list_recent_memories", None)
+            if not callable(lister):
+                return []
+            records = lister(session_context=session_context or {}, limit=limit, memory_type="promise")
+            if not isinstance(records, list):
+                return []
+            recent: list[str] = []
+            try:
+                tl = getattr(bridge, "get_timeline", None)
+                if callable(tl):
+                    events = tl(session_context=session_context or {}, limit=14)
+                    if isinstance(events, list):
+                        from .timeline_filter import is_llm_context_event
+
+                        for e in events:
+                            if not isinstance(e, dict) or not is_llm_context_event(e):
+                                continue
+                            text = str(e.get("content") or "").strip()
+                            if text:
+                                recent.append(text)
+            except Exception:
+                recent = []
+            from .memory import promise_settled
+
+            engine = getattr(self, "_inspiration_engine", None)
+            user = str((session_context or {}).get("user_id") or "")
+            out: list[dict] = []
+            for r in records[:limit]:
+                if isinstance(r, dict):
+                    content = str(r.get("content") or r.get("summary") or "").strip()
+                    mid = str(r.get("id") or "")
+                    imp = float(r.get("importance") or 0.5)
+                else:
+                    content = str(getattr(r, "content", "") or getattr(r, "summary", "") or "").strip()
+                    mid = str(getattr(r, "id", "") or "")
+                    imp = float(getattr(r, "importance", 0.5) or 0.5)
+                if not content:
+                    continue
+                if engine is not None and engine.promise_is_settled(user, content):
+                    logger.info("[Storyteller] 约定已结项（主动提过并已处理），不再作为由头: %s", content[:40])
+                    continue
+                if recent:
+                    settled, evidence = promise_settled(content, recent)
+                    if settled:
+                        logger.info(
+                            "[Storyteller] 约定已了结，不再作为主动由头: %s（依据：%s）", content[:40], evidence
+                        )
+                        continue
+                out.append({"id": mid, "content": content, "importance": imp})
+            return out
+        except Exception:
+            return []
+
+    async def _settle_proactive_promise(self, user: str, byhead_text: str, session_context: dict) -> None:
+        """主动消息**真的发出去**后，把这条约定由头消化掉（用户明确要求）。
+
+        规则：每提一次把该记忆权重降到 60%（减权）；累计提过 2 次即结项（此后不再当由头）。
+        理由：由头能发出去，说明"这件事"已经被处理过一次；一直重复会被对方看作复读。
+        """
+        try:
+            if not byhead_text:
+                return
+            engine = getattr(self, "_inspiration_engine", None)
+            bridge = self._get_memory_bridge()
+            items = self._recent_promise_items(limit=6, session_context=session_context)
+            for item in items:
+                content = str(item.get("content") or "")
+                if not content:
+                    continue
+                # 由头是若干条约定用「；」拼起来的，逐条对照
+                if content[:40] not in byhead_text and content not in byhead_text:
+                    continue
+                count = engine.note_promise_raised(user, content) if engine is not None else 1
+                mid = str(item.get("id") or "")
+                new_imp = max(0.15, float(item.get("importance") or 0.5) * 0.6)
+                if bridge is not None and mid:
+                    try:
+                        await bridge.update_importance(mid, new_imp)
+                    except Exception as exc:
+                        logger.debug("[Storyteller] 约定减权失败（忽略）: %s", exc)
+                if engine is not None and count >= 2:
+                    engine.mark_promise_settled(user, content)
+                    logger.info(
+                        "[Storyteller] 约定已结项（主动提过 %s 次，不再重复）: %s", count, content[:40]
+                    )
+                else:
+                    logger.info(
+                        "[Storyteller] 约定已主动提过 %s 次 → 权重降至 %.2f（再提一次即结项）: %s",
+                        count, new_imp, content[:40],
+                    )
+        except Exception as exc:
+            logger.warning("[Storyteller] 消化主动由头失败（忽略）: %s", exc)
+
     def _recent_promise_hint(self, limit: int = 3, *, session_context: dict | None = None) -> str:
         """只取记忆库里的「约定/承诺（promise）」类最近记忆。
 
@@ -4573,27 +4746,8 @@ class StorytellerPlugin(Star):
         否则会出现把「鱼罐头偏好」之类的记忆错当成「说好/约好的事」
         的幻觉由头（模型会演绎出「昨天说好的，今天你那边怎么样了」）。
         """
-        bridge = self._get_memory_bridge()
-        if bridge is None:
-            return ""
-        try:
-            lister = getattr(bridge, "list_recent_memories", None)
-            if not callable(lister):
-                return ""
-            records = lister(session_context=session_context or {}, limit=limit, memory_type="promise")
-            if not isinstance(records, list):
-                return ""
-            items = []
-            for r in records[:limit]:
-                if isinstance(r, dict):
-                    content = str(r.get("content") or r.get("summary") or "").strip()
-                else:
-                    content = str(getattr(r, "content", "") or getattr(r, "summary", "") or "").strip()
-                if content:
-                    items.append(content[:100])
-            return "；".join(items)
-        except Exception:
-            return ""
+        items = self._recent_promise_items(limit=limit, session_context=session_context)
+        return "；".join(str(it.get("content") or "")[:100] for it in items if it.get("content"))
 
     def _recent_context_hint(self, limit: int = 3) -> str:
         """取最近情绪余波 + 对话素材作为状态演化的上下文。"""
