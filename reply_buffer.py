@@ -72,8 +72,50 @@ def chunk_text(text: str, *, max_len: int = 46) -> list[str]:
 
 
 def _hard_split(seg: str, max_len: int) -> list[str]:
-    sub = re.findall(r"[^,，。；;！？!?\n]{1,%d}" % max_len, seg)
-    return [p for p in sub if p.strip()]
+    """按长度拆分超长句，同时保留标点和表情包占位符。"""
+    try:
+        limit = max(1, int(max_len))
+    except (TypeError, ValueError):
+        limit = 46
+    value = str(seg or "")
+    if not value:
+        return []
+    token_re = re.compile(r"\[EMOJI:[^\]]*\]")
+    units: list[str] = []
+    pos = 0
+    for match in token_re.finditer(value):
+        units.extend(value[pos : match.start()])
+        units.append(match.group(0))
+        pos = match.end()
+    units.extend(value[pos:])
+    break_chars = set(",，、；; \t")
+    pieces: list[str] = []
+    while units:
+        total = 0
+        cut = 0
+        preferred_cut = 0
+        for index, unit in enumerate(units):
+            unit_len = len(unit)
+            if cut and total + unit_len > limit:
+                break
+            if not cut and unit_len > limit:
+                cut = 1
+                break
+            total += unit_len
+            cut = index + 1
+            if len(unit) == 1 and unit in break_chars:
+                preferred_cut = cut
+            if total >= limit:
+                break
+        if preferred_cut:
+            cut = preferred_cut
+        if cut <= 0:
+            cut = 1
+        piece = "".join(units[:cut])
+        if piece.strip():
+            pieces.append(piece)
+        units = units[cut:]
+    return pieces
 
 
 class ReplyBufferManager:
@@ -382,13 +424,22 @@ class ReplyBufferManager:
         with self._lock:
             if session_id:
                 self._queues.pop(session_id, None)
+                self._sent_texts.pop(session_id, None)
             else:
                 self._queues.clear()
-        for sid in list(self._tasks.keys()):
-            t = self._tasks[sid]
-            if not t.done():
+                self._sent_texts.clear()
+        task_ids = [session_id] if session_id else list(self._tasks.keys())
+        for sid in task_ids:
+            t = self._tasks.get(sid)
+            if t is not None and not t.done():
                 t.cancel()
-        self._tasks.clear()
+            self._tasks.pop(sid, None)
+        if session_id:
+            self._speed_up.pop(session_id, None)
+            self._interrupted.pop(session_id, None)
+        else:
+            self._speed_up.clear()
+            self._interrupted.clear()
 
     def stop(self) -> None:
         self.purge()

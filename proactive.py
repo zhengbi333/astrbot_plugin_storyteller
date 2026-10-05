@@ -974,6 +974,14 @@ class ProactiveManager:
             self._loop_task = asyncio.ensure_future(self.run_loop())
 
     async def stop(self) -> None:
-        if self._loop_task is not None:
-            self._loop_task.cancel()
-            self._loop_task = None
+        task = self._loop_task
+        self._loop_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("[Storyteller] 主动对话任务退出时有未处理异常", exc_info=True)

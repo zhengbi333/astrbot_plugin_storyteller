@@ -3560,10 +3560,22 @@ class StorytellerPlugin(Star):
                 return
             streaks = raw.get("silence_streak")
             if isinstance(streaks, dict):
-                self._silence_streak = {str(k): int(v or 0) for k, v in streaks.items()}
+                restored_streaks: dict[str, int] = {}
+                for key, value in streaks.items():
+                    try:
+                        restored_streaks[str(key)] = max(0, min(20, int(value or 0)))
+                    except (TypeError, ValueError):
+                        continue
+                self._silence_streak = restored_streaks
             usage = raw.get("cap_usage")
             if isinstance(usage, dict):
-                self._cap_usage = {str(k): int(v or 0) for k, v in usage.items()}
+                restored_usage: dict[str, int] = {}
+                for key, value in usage.items():
+                    try:
+                        restored_usage[str(key)] = max(0, int(value or 0))
+                    except (TypeError, ValueError):
+                        continue
+                self._cap_usage = restored_usage
             # 注：`_my_recent_replies`（口癖检查窗口）**有意不落盘**——
             # 其注释写明"只看最近几轮，重启后重新积累即可"，故不纳入运行态。
         except Exception as exc:
@@ -4136,9 +4148,23 @@ class StorytellerPlugin(Star):
     async def terminate(self):
         # 0.238：退出前强制刷运行态（连续沉默计数 / 能力每日用量）
         self._save_runtime_state(force=True)
+        buffer = getattr(self, "reply_buffer", None)
+        if buffer is not None:
+            try:
+                buffer.stop()
+            except Exception:
+                pass
         await self.proactive.stop()
-        if getattr(self, "_mind_task", None) is not None:
-            self._mind_task.cancel()
+        mind_task = getattr(self, "_mind_task", None)
+        if mind_task is not None:
+            mind_task.cancel()
+            try:
+                await mind_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug("[Storyteller] 内心任务退出时有未处理异常", exc_info=True)
+            self._mind_task = None
         if self._memory_managed_active:
             bridge = self._get_memory_bridge()
             if bridge is not None:

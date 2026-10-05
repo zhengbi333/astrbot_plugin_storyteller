@@ -66,6 +66,26 @@ class EmojiStore:
         self._meta_file = Path(data_dir) / "emoji_categories.json"
         self._prefs_file = Path(data_dir) / "emoji_prefs.json"
 
+    @staticmethod
+    def _safe_category_id(cid: str) -> str:
+        """分类目录只接受自身生成的安全标识，拒绝路径片段。"""
+        value = str(cid or "").strip()
+        if not value or value in {".", ".."} or Path(value).name != value:
+            return ""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value):
+            return ""
+        return value
+
+    @staticmethod
+    def _safe_filename(filename: str) -> str:
+        """文件操作只接受图库中的 basename，避免客户端构造相对路径。"""
+        value = str(filename or "").strip()
+        if not value or Path(value).name != value or value in {".", ".."}:
+            return ""
+        if Path(value).suffix.lower() not in _IMAGE_EXTS:
+            return ""
+        return value
+
     # ------------------------------------------------------------ 元数据
 
     def _load_meta(self) -> list[dict[str, Any]]:
@@ -125,6 +145,9 @@ class EmojiStore:
         raise ValueError("分类不存在")
 
     def remove_category(self, cid: str) -> None:
+        cid = self._safe_category_id(cid)
+        if not cid:
+            return
         meta = self._load_meta()
         meta = [m for m in meta if str(m.get("id") or "") != cid]
         self._save_meta(meta)
@@ -145,6 +168,9 @@ class EmojiStore:
             pass
 
     def _files(self, cid: str) -> list[str]:
+        cid = self._safe_category_id(cid)
+        if not cid:
+            return []
         directory = self._dir / cid
         if not directory.exists():
             return []
@@ -177,16 +203,24 @@ class EmojiStore:
         return out
 
     def add_emoji(self, cid: str, filename: str, content: bytes) -> dict[str, Any]:
-        directory = self._dir / cid
-        directory.mkdir(parents=True, exist_ok=True)
+        cid = self._safe_category_id(cid)
+        if not cid:
+            raise ValueError("分类 id 无效")
+        filename = self._safe_filename(filename)
         ext = Path(filename).suffix.lower()
         if ext not in _IMAGE_EXTS:
             raise ValueError("不支持的图片格式")
+        directory = self._dir / cid
+        directory.mkdir(parents=True, exist_ok=True)
         target = directory / f"{uuid.uuid4().hex[:8]}{ext}"
         target.write_bytes(content)
         return {"file": target.name, "count": len(self._files(cid))}
 
     def remove_emoji(self, cid: str, filename: str) -> None:
+        cid = self._safe_category_id(cid)
+        filename = self._safe_filename(filename)
+        if not cid or not filename:
+            return
         target = self._dir / cid / filename
         if target.exists():
             target.unlink()

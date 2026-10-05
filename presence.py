@@ -65,11 +65,20 @@ def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def _as_float(value: Any, default: float) -> float:
+    """将持久化/模型返回的数值安全转换，坏值回退默认值。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number == number else default
+
+
 def _norm_three(presence: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
     """兼容旧数据：新键（tone/tempo/battery）优先，旧键（valence/arousal/energy）兜底迁移。"""
-    presence["tone"] = clamp(float(raw.get("tone", raw.get("valence", 0.0)) or 0.0), -1.0, 1.0)
-    presence["tempo"] = clamp(float(raw.get("tempo", raw.get("arousal", 0.0)) or 0.0), -1.0, 1.0)
-    presence["battery"] = clamp(float(raw.get("battery", raw.get("energy", 0.5)) or 0.5), 0.0, 1.0)
+    presence["tone"] = clamp(_as_float(raw.get("tone", raw.get("valence", 0.0)) or 0.0, 0.0), -1.0, 1.0)
+    presence["tempo"] = clamp(_as_float(raw.get("tempo", raw.get("arousal", 0.0)) or 0.0, 0.0), -1.0, 1.0)
+    presence["battery"] = clamp(_as_float(raw.get("battery", raw.get("energy", 0.5)) or 0.5, 0.5), 0.0, 1.0)
     return presence
 
 
@@ -373,9 +382,9 @@ class PresenceStore:
         loaded = self.load(with_decay=False)
         normalized = default_presence()
         if isinstance(presence, dict):
-            normalized["tone"] = clamp(float(presence.get("tone", 0.0) or 0.0), -1.0, 1.0)
-            normalized["tempo"] = clamp(float(presence.get("tempo", 0.0) or 0.0), -1.0, 1.0)
-            normalized["battery"] = clamp(float(presence.get("battery", 0.5) or 0.5), 0.0, 1.0)
+            normalized["tone"] = clamp(_as_float(presence.get("tone", 0.0) or 0.0, 0.0), -1.0, 1.0)
+            normalized["tempo"] = clamp(_as_float(presence.get("tempo", 0.0) or 0.0, 0.0), -1.0, 1.0)
+            normalized["battery"] = clamp(_as_float(presence.get("battery", 0.5) or 0.5, 0.5), 0.0, 1.0)
             for key in ("mood", "thought", "energy_label", "updated_at", "source"):
                 if key in presence:
                     normalized[key] = str(presence[key] or "").strip()[:400]
