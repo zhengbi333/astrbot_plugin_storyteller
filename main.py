@@ -262,11 +262,13 @@ class StorytellerPlugin(Star):
         import json as _json
 
         try:
-            from .intercept import DEFAULT_TEMPLATE, LEGACY_DEFAULT_TEMPLATE
+            from .intercept import DEFAULT_TEMPLATE, is_legacy_default_template
         except Exception:
             return
         current = str(self.config.get("intercept.template", "") or "").strip()
-        if not current or current != LEGACY_DEFAULT_TEMPLATE.strip():
+        # 0.240：认「所有历史默认值」（含长期挂在 schema 里那版 11 个占位符的默认）——
+        # 新装机正是拿到那一版，旧逻辑只认 0.184 前的那一串，所以一直没被升级。
+        if not current or not is_legacy_default_template(current) or current == DEFAULT_TEMPLATE.strip():
             return
         cfg_path = Path(self.data_dir).parent.parent / "config" / "astrbot_plugin_storyteller_config.json"
         raw: dict = {}
@@ -288,7 +290,11 @@ class StorytellerPlugin(Star):
             pass
         self.raw_config = raw
         self.config = ConfigView(raw)
-        logger.info("[Storyteller] 拦截模板已自动升级为新默认（全部占位符应用，共 17 个）")
+        # 占位符个数从模板本身数出来——写死过一次（"共 17 个"），默认加到 18 后就对不上了
+        _ph_count = len(set(re.findall(r"\{[^}]+\}", DEFAULT_TEMPLATE)))
+        logger.info(
+            "[Storyteller] 拦截模板已自动升级为新默认（占位符 %s 个，已全部应用）", _ph_count
+        )
 
     # ------------------------------------------------------------ 消息入口
 

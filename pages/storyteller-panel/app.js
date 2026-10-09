@@ -1739,9 +1739,10 @@ async function renderRewrite() {
           <div class="panel-head"><h3 class="panel-title">发送给润色 LLM 的模板</h3>
             <div style="display:flex;align-items:center;gap:10px"><button class="btn" id="rw-save-template">保存模板</button></div>
           </div>
-          <p class="section-desc">润色提示词模板；占位符 {回复}{人格}{风格}{状态}{关系}{当前说话}{当前用户}{场合}… 发送前替换。</p>
+          <p class="section-desc">润色提示词模板；下方占位符发送前替换为各模块当前内容（与「拦＆改」同一套，共 19 个）。<b>{回复}</b> 就是「待润色的那段原文」，本页必用。</p>
           <div class="ph-chips" id="rw-chips"></div>
           <textarea id="rw-template" class="template-editor" spellcheck="false">${esc(rwVals.template || "")}</textarea>
+          <div class="field-key" id="rw-unused"></div>
         </section>
         <section class="panel">
           <div class="panel-head"><h3 class="panel-title">发送给润色 LLM 的内容</h3><span class="hint">实时</span></div>
@@ -1768,22 +1769,9 @@ async function renderRewrite() {
   `;
   await bindMasterSwitch("rewrite-enabled", "rewrite", "enabled");
   bindSettingsIn(view);
-  // 模板占位符 chips
-  const chipNode = document.getElementById("rw-chips");
-  const ta = document.getElementById("rw-template");
-  if (chipNode && ta) {
-    chipNode.innerHTML = TEMPLATE_PLACEHOLDERS.map((p) => `<span class="ph-chip" data-ph="${esc(p)}">${esc(p)}</span>`).join("");
-    chipNode.querySelectorAll(".ph-chip").forEach((chip) => {
-      chip.addEventListener("click", () => {
-        const s = ta.selectionStart === null ? ta.value.length : ta.selectionStart;
-        const e = ta.selectionEnd === null ? ta.value.length : ta.selectionEnd;
-        ta.value = ta.value.slice(0, s) + chip.dataset.ph + ta.value.slice(e);
-        const np = s + chip.dataset.ph.length;
-        ta.focus();
-        try { ta.setSelectionRange(np, np); } catch (err) {}
-      });
-    });
-  }
+  // 模板占位符 chips（0.240：与「拦＆改」共用同一套清单与渲染，避免两边各写一份而漂移）
+  await ensureTemplatePlaceholders();
+  bindTemplateEditor("rw-chips", "rw-template", "rw-unused", "polish");
   const saveTpl = document.getElementById("rw-save-template");
   if (saveTpl) saveTpl.addEventListener("click", async () => {
     const v = ((document.getElementById("rw-template") || {}).value || "");
@@ -4403,9 +4391,90 @@ async function renderDiagSub() {
 }
 
 /* ------------------------------------------------------------ 拦＆改：模板占位符 */
-/* 0.178 起：占位符清单由拦截接口下发（intercept/status.placeholders，16 个，含 {穿搭}/{回复}）；
-   此常量仅在后端未返回时兜底（历史 14 个） */
-const TEMPLATE_PLACEHOLDERS = ["{人格}", "{当前说话}", "{上下文}", "{当前用户}", "{场合}", "{身份}", "{关系}", "{风格}", "{状态}", "{思绪}", "{日程}", "{记忆}", "{天气}", "{见闻}", "{时间}"];
+/* 0.178 起：占位符清单由后端下发（intercept/status.placeholders，与 intercept.TEMPLATE_PLACEHOLDERS 同源）。
+   0.240：下面这份常量**只作离线兜底**，必须与后端逐项一致（有回归测试 audit_58 盯着）；
+   两条链路（拦截模板 / 润色模板）现在共用同一套芯片与同一份清单，不再各写一份。 */
+const TEMPLATE_PLACEHOLDERS = [
+  "{人格}", "{上下文}", "{当前说话}", "{当前用户}", "{场合}", "{身份}", "{关系}", "{风格}",
+  "{状态}", "{思绪}", "{日程}", "{穿搭}", "{记忆}", "{天气}", "{见闻}", "{生图意愿}",
+  "{搜索结果}", "{时间}", "{回复}",
+];
+
+/* 占位符作用域（兜底用；权威值由后端 placeholder_list().scope 下发）：
+   "{回复}" = 待润色的那段原文，只有润色链路会赋值，在拦截模板里恒为空字符串。 */
+const TEMPLATE_PLACEHOLDER_SCOPES = { "{回复}": "polish" };
+
+/* 后端未加载过占位符清单时惰性取一次（润色页可能先于拦截页被打开）。 */
+async function ensureTemplatePlaceholders() {
+  if (state.interceptPlaceholders && state.interceptPlaceholders.length) return state.interceptPlaceholders;
+  try {
+    const st = await apiGet("intercept/status");
+    state.interceptPlaceholders = (st && st.placeholders) || [];
+  } catch (err) {
+    state.interceptPlaceholders = [];
+  }
+  return state.interceptPlaceholders;
+}
+
+/* 统一的「占位符条目」：优先后端下发（带 scope），缺失时回退常量。 */
+function templatePlaceholderItems() {
+  const backend = state.interceptPlaceholders;
+  if (backend && backend.length) {
+    return backend
+      .map((x) => (x && typeof x === "object")
+        ? { ph: String(x.placeholder || x.key || ""), scope: String(x.scope || "") }
+        : { ph: String(x), scope: TEMPLATE_PLACEHOLDER_SCOPES[String(x)] || "" })
+      .filter((x) => x.ph);
+  }
+  return TEMPLATE_PLACEHOLDERS.map((ph) => ({ ph, scope: TEMPLATE_PLACEHOLDER_SCOPES[ph] || "" }));
+}
+
+const SCOPE_LABEL = { polish: "润色" };
+
+/* 把一个模板编辑区绑定好：芯片插入 + 作用域标注 + 「未使用占位符」提示。
+   pageKind：reply（拦截模板）/ polish（润色模板）——不是本页有效的占位符会标灰并给出说明。 */
+function bindTemplateEditor(chipsId, editorId, hintId, pageKind) {
+  const chipNode = document.getElementById(chipsId);
+  const ta = document.getElementById(editorId);
+  if (!chipNode || !ta) return;
+  const items = templatePlaceholderItems();
+  chipNode.innerHTML = items.map((x) => {
+    const foreign = x.scope && x.scope !== pageKind;
+    const tip = foreign
+      ? ` title="仅${SCOPE_LABEL[x.scope] || x.scope}模板有效；在本页会被替换为空字符串"`
+      : "";
+    return `<span class="ph-chip${foreign ? " ph-chip-scope" : ""}" data-ph="${esc(x.ph)}"${tip}>${esc(x.ph)}</span>`;
+  }).join("");
+  chipNode.querySelectorAll(".ph-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      const val = chip.dataset.ph;
+      const s = ta.selectionStart === null ? ta.value.length : ta.selectionStart;
+      const e = ta.selectionEnd === null ? ta.value.length : ta.selectionEnd;
+      ta.value = ta.value.slice(0, s) + val + ta.value.slice(e);
+      const npos = s + val.length;
+      ta.focus();
+      try { ta.setSelectionRange(npos, npos); } catch (err) { /* 桩环境忽略 */ }
+      ta.dispatchEvent(new Event("input"));
+    });
+  });
+  const hintNode = hintId ? document.getElementById(hintId) : null;
+  if (!hintNode) return;
+  const refresh = () => {
+    const text = String(ta.value || "");
+    // 只统计**本页适用**的占位符：别把"只在另一个模板有效"的那些算成"你没用"
+    // （例如拦截页里的 {回复} 本来就会被替换成空字符串，算进去只会误导）。
+    const applicable = items.filter((x) => !x.scope || x.scope === pageKind);
+    const unused = applicable.map((x) => x.ph).filter((ph) => !text.includes(ph));
+    const foreign = items.length - applicable.length;
+    hintNode.textContent = unused.length
+      ? `当前模板未使用 ${unused.length}/${applicable.length} 个可用占位符：${unused.join("、")}`
+      : `已使用全部 ${applicable.length} 个可用占位符`
+        + (foreign ? `（另有 ${foreign} 个占位符只在另一个模板有效，已标灰）` : "");
+    hintNode.style.color = unused.length ? "" : "var(--ok, #4ea)";
+  };
+  ta.addEventListener("input", refresh);
+  refresh();
+}
 
 /* 各模块注入占位符提示卡：标明该模块在「最终发送给对话 LLM 的信息格式」里提供哪些占位符 */
 const MODULE_PLACEHOLDERS = {
@@ -4586,9 +4655,10 @@ async function renderIntercept() {
               <button class="btn" id="itc-save-template">保存模板</button>
             </div>
           </div>
-          <p class="section-desc">「接管改换」模式按此模板组装提示词（发送给对话模型时的 system_prompt）；占位符发送前替换为各模块当前内容。</p>
+          <p class="section-desc">「接管改换」模式按此模板组装提示词（发送给对话模型时的 system_prompt）；占位符发送前替换为各模块当前内容。标灰的占位符在本模板里会被替换为空字符串（如 <b>{回复}</b> 仅润色模板有效）。</p>
           <div class="ph-chips" id="itc-chips"></div>
           <textarea id="itc-template" class="template-editor" spellcheck="false">${esc(mValues.template || "")}</textarea>
+          <div class="field-key" id="itc-unused"></div>
           <div class="field-key">提示：点击占位符插入编辑区；未配置的模块占位符会被替换为空字符串。</div>
         </section>
         <section class="panel">
@@ -4661,27 +4731,8 @@ function bindInterceptSettings() {
 }
 
 function buildTemplateChips() {
-  const chipNode = document.getElementById("itc-chips");
-  if (!chipNode) return;
-  // 0.178：优先后端下发（intercept/status.placeholders，16 个），兜底前端常量
-  const backendList = (state.interceptPlaceholders && state.interceptPlaceholders.length)
-    ? state.interceptPlaceholders.map((p) => (p && typeof p === "object" ? (p.placeholder || p.key || "") : String(p)))
-    : [];
-  const list = backendList.length ? backendList : TEMPLATE_PLACEHOLDERS;
-  chipNode.innerHTML = list.map((p) => `<span class="ph-chip" data-ph="${esc(p)}">${esc(p)}</span>`).join("");
-  chipNode.querySelectorAll(".ph-chip").forEach((chip) => {
-    chip.addEventListener("click", () => {
-      const el = document.getElementById("itc-template");
-      if (!el) return;
-      const val = chip.dataset.ph;
-      const s = el.selectionStart === null ? el.value.length : el.selectionStart;
-      const e = el.selectionEnd === null ? el.value.length : el.selectionEnd;
-      el.value = el.value.slice(0, s) + val + el.value.slice(e);
-      const npos = s + val.length;
-      el.focus();
-      try { el.setSelectionRange(npos, npos); } catch (err) { /* 桩环境忽略 */ }
-    });
-  });
+  // 0.240：与「润色」页共用同一套占位符清单与渲染（此前两页各写一份 → 润色页那份漏了 4 个）
+  bindTemplateEditor("itc-chips", "itc-template", "itc-unused", "reply");
 }
 
 async function saveInterceptTemplate() {

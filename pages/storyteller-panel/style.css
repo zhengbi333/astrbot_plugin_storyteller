@@ -2055,3 +2055,9 @@ select.input {
 }
 
 
+
+/* 0.240：占位符芯片——只在另一个模板里有效的那些（如 {回复} 仅润色模板有效）标灰处理 */
+.ph-chip-scope {
+  opacity: 0.45;
+  border-style: dashed;
+}

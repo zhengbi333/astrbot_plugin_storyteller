@@ -128,6 +128,13 @@ TEMPLATE_PLACEHOLDERS: dict[str, str] = {
     "reply": "{回复}",
 }
 
+# 占位符作用域：只对**特定模板**有意义的占位符（其余两个模板都有效）。
+# `reply` = 待润色的那段原文，**只有润色链路会给它赋值**（reply_polish.py: anchors["reply"] = raw），
+# 在「拦和改」模板里它恒被替换为空字符串 —— 前端据此把它标灰并给出说明，避免误用。
+PLACEHOLDER_SCOPES: dict[str, str] = {
+    "reply": "polish",
+}
+
 # 占位符显示顺序（前端 chips 与后端替换同序；人格/当前对话在前，各模块锚在后，回复内容最后）
 TEMPLATE_ORDER = [
     "persona", "context", "current_text", "current_user", "place", "identity",
@@ -159,13 +166,17 @@ DEFAULT_TEMPLATE = (
     "{生图意愿}\n"
     "{搜索结果}\n"
     "当前时间：{时间}\n\n"
-    "【若需要改写/润色的内容】\n"
-    "{回复}\n\n"
     "请以这个角色的身份，基于本次对话上下文，自然回应对方刚刚说的话；不要提任何系统机制。"
 )
 
 # 0.184 迁移：旧版本默认模板（11 个占位符，被用户保存进配置后新默认不生效）；
 # 加载时若配置值仍等于它，自动升级为新完整模板（17 个占位符全应用）。
+# 0.240：除 0.184 那个旧串外，schema 里长期挂着另一版默认（11 个占位符）——
+# AstrBot 会用 schema 默认值补齐配置，于是**新装机拿到的就是那一版**，代码里的完整默认从未生效。
+# 这里一并登记，加载时若配置值与其中任一完全一致，就升级为当前完整默认（自定义过的不动）。
+LEGACY_DEFAULT_TEMPLATES: tuple[str, ...] = ()
+
+
 LEGACY_DEFAULT_TEMPLATE = (
     "【本次对话上下文】\n"
     "{上下文}\n\n"
@@ -186,16 +197,76 @@ LEGACY_DEFAULT_TEMPLATE = (
 )
 
 
+# 0.240：曾被长期挂在 _conf_schema.json 里的那版拦截模板默认值（11 个占位符）。
+# AstrBot 会用 schema 默认值补齐配置，因此**新装机拿到的正是这一版**——
+# 它是"默认模板没全用上"的直接原因。这里**冻结**历史原文以便识别旧值；
+# 不要改成"从 schema 读"：schema 已同步为新默认，那样就认不出旧串了。
+SCHEMA_LEGACY_DEFAULT_TEMPLATE = (
+    "【本次对话上下文】\n"
+    "{上下文}\n\n"
+    "【对方刚刚说的话】\n"
+    "{当前说话}\n\n"
+    "【你是「为你续写的故事」里的角色，以下是此刻的你】\n"
+    "{身份}\n"
+    "{关系}\n"
+    "{风格}\n"
+    "{状态}\n"
+    "{日程}\n"
+    "{记忆}\n"
+    "{天气}\n"
+    "{见闻}\n"
+    "当前时间：{时间}\n\n"
+    "请以这个角色的身份，基于本次对话上下文，自然回应对方刚刚说的话；不要提任何系统机制。"
+)
+
+
+def fillable_placeholder_keys(mode: str) -> set[str]:
+    """某条链路**真正会赋值**的占位符 key 集合（供自检用：默认模板只能引用这些）。
+
+    - 两条链路都基于 `main._anchor_values`（各模块锚）；
+    - 接管（reply）另外补 current_text / context / inner；
+    - 润色（polish）另外补 current_text / context / reply。
+    """
+    base = {
+        "persona", "current_user", "place", "identity", "voice", "presence", "schedule",
+        "wardrobe", "memory", "weather", "mind", "image_wish", "search_result", "time",
+        "relationship",
+    }
+    if mode == "polish":
+        return base | {"current_text", "context", "reply"}
+    return base | {"current_text", "context", "inner"}
+
+
 def placeholder_list() -> list[dict[str, str]]:
-    """占位符清单（供前端渲染 chips）。"""
+    """占位符清单（供前端渲染 chips）；`scope` 非空表示只在对应模板有效。"""
     return [
-        {"key": key, "placeholder": TEMPLATE_PLACEHOLDERS[key], "label": key}
+        {
+            "key": key,
+            "placeholder": TEMPLATE_PLACEHOLDERS[key],
+            "label": key,
+            "scope": PLACEHOLDER_SCOPES.get(key, ""),
+        }
         for key in TEMPLATE_ORDER
     ]
 
 
 def template_placeholder_of(key: str) -> str:
     return TEMPLATE_PLACEHOLDERS.get(key, "")
+
+
+# 0.240：旧默认串清单（模块加载后补齐）——LEGACY_DEFAULT_TEMPLATE（0.184 前）+
+# schema 里那版 11 个占位符的默认值（新装机实际拿到的那一版）
+LEGACY_DEFAULT_TEMPLATES = tuple(
+    x for x in {LEGACY_DEFAULT_TEMPLATE, SCHEMA_LEGACY_DEFAULT_TEMPLATE} if x
+)
+
+
+def is_legacy_default_template(value: str) -> bool:
+    """配置里的模板是否等于「某个历史默认值」（完全一致才算，避免覆盖用户自定义）。"""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return any(text == str(item or "").strip() for item in LEGACY_DEFAULT_TEMPLATES)
 
 
 def replace_template(template: str, values: dict[str, str]) -> str:
