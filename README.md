@@ -1,4 +1,4 @@
-﻿# 为你续写的故事
+# 为你续写的故事
 
 `astrbot_plugin_storyteller`（中文名：**为你续写的故事**）是面向 AstrBot 的**拟人陪伴插件**：让 Bot 有自己的状态、情绪、日程、穿搭、衣柜、梦境与日记，记得和每个人的关系，用拟人的方式说话、沉默、发表情包，甚至主动找你聊天。
 
@@ -64,3 +64,9 @@ backgrounds/ / emojis/
 ## 更新日志
 
 见 [changelogs/](changelogs/)。
+
+## 许可
+
+- 本项目采用 **GNU AGPL-3.0**（与 AstrBot 一致）：Copyright (C) 2026 证毕 (zhengbi333)
+- 可自由使用、修改、分发；若通过网络提供服务，需同样以 AGPL-3.0 开放对应源码。
+- 完整条款见仓库根目录 LICENSE；上游 AstrBot：https://github.com/AstrBotDevs/AstrBot
