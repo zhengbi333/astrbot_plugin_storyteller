@@ -178,6 +178,25 @@ def _looks_asking_context(text: str) -> bool:
     return False
 
 
+# 0.241：外部工具（AstrBot 主链 / MCP / 其它插件注册的工具）在 tool loop 里的标记前缀
+_EXT_TOOL_PREFIX = "ext:"
+
+
+class _ToolCallContext:
+    """给 AstrBot 工具执行用的上下文代理。
+
+    AstrBot 的工具包装层会读 `context.context.event` 做权限判断与 handler 调用；
+    其余属性（provider_manager 等）透传给插件自己的 Context。
+    """
+
+    def __init__(self, real: Any, event: Any) -> None:
+        self._real = real
+        self.context = types.SimpleNamespace(event=event)
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._real, item)
+
+
 class StorytellerPlugin(Star):
     """陪伴插件主类：管理各功能模块、配置与面板后端接口。"""
 
@@ -2288,6 +2307,11 @@ class StorytellerPlugin(Star):
                         if self.config.bool("capabilities.enabled", True) and self.config.bool("capabilities.native_tools", True) and not self._native_tools_unsupported:
                             # 0.200：本轮正则兜底已做过的动作，不再给模型（消除双重执行）
                             _cap_tools = build_tool_schemas(self, "接管", exclude=caps_done(event))
+                            # 0.241：并入 AstrBot 已激活工具（含 MCP 与其它插件），开关默认关
+                            try:
+                                _cap_tools = list(_cap_tools) + self._astrbot_tool_schemas()
+                            except Exception as _ext_exc:
+                                logger.warning("[Storyteller] 并入外部工具失败（忽略）: %s", _ext_exc)
                     except Exception as _texc:
                         logger.warning("[Storyteller] 工具 schema 生成失败（改用文本协议）: %s", _texc)
                         _cap_tools = []
@@ -2838,6 +2862,88 @@ class StorytellerPlugin(Star):
             timeout=90,
         )
 
+    # ------------------------------------------------------------ 外部工具桥（0.241）
+    def _astrbot_tools_enabled(self) -> bool:
+        try:
+            return bool(self.config.bool("capabilities.astrbot_tools_enabled", False))
+        except Exception:
+            return False
+
+    def _astrbot_tool_allowlist(self) -> set[str]:
+        raw = str(self.config.get("capabilities.astrbot_tools_allowlist", "") or "")
+        return {x.strip() for x in raw.replace("，", ",").split(",") if x.strip()}
+
+    def _astrbot_tool_manager(self) -> Any:
+        """取 AstrBot 的 FunctionToolManager（拿不到就返回 None）。"""
+        try:
+            getter = getattr(self.context, "get_llm_tool_manager", None)
+            if callable(getter):
+                return getter()
+        except Exception as exc:
+            logger.debug("[Storyteller] 取工具管理器失败: %s", exc)
+        return None
+
+    def _astrbot_tool_schemas(self) -> list[dict]:
+        """把 AstrBot 已激活工具的描述并入 tools（受开关与白名单约束）。"""
+        if not self._astrbot_tools_enabled():
+            return []
+        manager = self._astrbot_tool_manager()
+        if manager is None:
+            return []
+        try:
+            descs = list(manager.get_func_desc_openai_style() or [])
+        except Exception as exc:
+            logger.warning("[Storyteller] 读取 AstrBot 工具描述失败: %s", exc)
+            return []
+        allow = self._astrbot_tool_allowlist()
+        out: list[dict] = []
+        for item in descs:
+            if not isinstance(item, dict):
+                continue
+            fn = item.get("function") if isinstance(item.get("function"), dict) else {}
+            name = str(fn.get("name") or "")
+            if not name:
+                continue
+            if allow and name not in allow:
+                continue
+            out.append(item)
+        if out:
+            logger.info("[Storyteller] 外部工具已并入本轮 tools: %s", [x["function"]["name"] for x in out])
+        return out
+
+    def _astrbot_tool_names(self) -> set[str]:
+        return {
+            str((item.get("function") or {}).get("name") or "")
+            for item in self._astrbot_tool_schemas()
+            if (item.get("function") or {}).get("name")
+        }
+
+    async def _call_astrbot_tool(self, name: str, args: dict, event: Any) -> dict:
+        """执行一个 AstrBot 工具（MCP / 其它插件 / 主链工具），返回统一结果字典。"""
+        if not self._astrbot_tools_enabled():
+            return {"ok": False, "status": "disabled", "message": "外部工具开关没开"}
+        manager = self._astrbot_tool_manager()
+        if manager is None:
+            return {"ok": False, "status": "unavailable", "message": "拿不到 AstrBot 工具管理器"}
+        try:
+            tool_set = manager.get_full_tool_set()
+            tool = tool_set.get_tool(name) if tool_set is not None else None
+        except Exception as exc:
+            return {"ok": False, "status": "error", "message": f"取工具失败：{exc}"}
+        if tool is None:
+            return {"ok": False, "status": "missing", "message": f"没有这个工具：{name}"}
+        payload = dict(args or {})
+        try:
+            raw = await tool.call(_ToolCallContext(self.context, event), **payload)
+        except TypeError as exc:
+            # 参数名/类型不对：如实告诉模型，别让它以为做成了
+            return {"ok": False, "status": "bad_args", "message": f"参数不对：{exc}"}
+        except Exception as exc:
+            logger.warning("[Storyteller] 外部工具执行失败 %s: %s", name, exc)
+            return {"ok": False, "status": "error", "message": f"{type(exc).__name__}: {str(exc)[:160]}"}
+        text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
+        return {"ok": True, "status": "ok", "tool": name, "result": (text or "")[:4000]}
+
     async def _generate_tool_loop(
         self,
         provider: Any,
@@ -2914,6 +3020,7 @@ class StorytellerPlugin(Star):
             # 校验失败的（超额 / 未提供 / 参数坏）照旧给出拒绝结果，不执行。
             planned: list[tuple[int, str, dict]] = []
             ro_planned: list[tuple[int, str, dict]] = []
+            ext_tool_names = self._astrbot_tool_names()
             for index, call in enumerate(calls):
                 fn = call.get("function") or {}
                 name = str(fn.get("name") or "")
@@ -2924,6 +3031,9 @@ class StorytellerPlugin(Star):
                 except (ValueError, TypeError):
                     payload = None
                 cap_name = cap_name_from_tool(name)
+                # 0.241：外部工具用 ext: 前缀分流，不走 capabilities.dispatch
+                if name in ext_tool_names:
+                    cap_name = _EXT_TOOL_PREFIX + name
                 if index >= 3:
                     planned.append((index, "", {"ok": False, "status": "limited", "message": "本轮最多执行三个能力"}))
                 elif name not in allowed:
@@ -2948,7 +3058,11 @@ class StorytellerPlugin(Star):
             else:
                 planned.extend(ro_planned)
             for index, cap_name, payload_or_result in sorted(planned, key=lambda item: item[0]):
-                if cap_name:
+                if cap_name.startswith(_EXT_TOOL_PREFIX):
+                    result = await self._call_astrbot_tool(
+                        cap_name[len(_EXT_TOOL_PREFIX):], payload_or_result, event
+                    )
+                elif cap_name:
                     result = await cap_dispatch(self, event, cap_name, payload_or_result)
                 else:
                     result = payload_or_result

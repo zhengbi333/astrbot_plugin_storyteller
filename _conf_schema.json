@@ -1264,6 +1264,18 @@
         "default": true,
         "hint": "关闭后模型不再被告知任何可主动做的事（只剩被动聊天）。"
       },
+      "astrbot_tools_enabled": {
+        "description": "允许调用 AstrBot/MCP 工具",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，接管链路也能调用 AstrBot 主链上已激活的工具（MCP 服务器、其它插件注册的工具，例如「为你而在的认知」的读写文件/抓网页）。这些工具在面板里配置的「谁能用」权限**照样生效**。默认关闭：开了等于把工具能力开放给能跟 Bot 说话的所有人。"
+      },
+      "astrbot_tools_allowlist": {
+        "description": "外部工具白名单",
+        "type": "string",
+        "default": "",
+        "hint": "逗号分隔的工具名；留空表示允许全部已激活工具。建议只放你真要用的那几个，例如：toolbox_fs_read,toolbox_web_search。"
+      },
       "max_rounds": {
         "description": "能力执行轮次上限",
         "type": "int",
