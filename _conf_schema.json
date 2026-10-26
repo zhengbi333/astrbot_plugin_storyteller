@@ -498,6 +498,18 @@
         "default": true,
         "hint": "开启后，捕获 LLM 回复（接管直连/走主链/放行）并交给润色模型按模板二次润色与人格校准；失败/驳回时用原回复。"
       },
+      "skip_short_enabled": {
+        "description": "短句不润色",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，「草」「行吧」「6」这类很短的回复会**跳过润色**直接发出。润色是第二个模型重写，看不到人格卡里的 AI 味黑名单，短句被它扩写后反而更假；长回复仍然照常润色。不想这样就把开关关掉。"
+      },
+      "skip_short_chars": {
+        "description": "短句阈值（字）",
+        "type": "int",
+        "default": 12,
+        "hint": "回复长度不超过这个字数就跳过润色（1~40）。默认 12 字，覆盖绝大多数群友腔短句。"
+      },
       "parallel_with_checks": {
         "description": "润色与判定并行",
         "type": "bool",

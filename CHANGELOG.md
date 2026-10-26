@@ -2,7 +2,13 @@
 
 完整按版本日志见 [changelogs/](changelogs/) 目录。
 
-## alpha-0.241（当前）
+## alpha-0.242（当前）
+
+- **短回复跳过润色**（`rewrite.skip_short_enabled` 默认开，阈值 `skip_short_chars` 默认 12）：润色是第二个模型重写、看不到人格卡的黑名单，1~10 字的群友腔被它扩写成小作文反而更假；现改为短句原样发出，长回复照常润色。
+- **外部工具描述一次取用 + 20 秒缓存**：0.241 的桥接在一轮里会重复问工具集两三次，现合并为 `_astrbot_tool_bundle()`（键=启用状态+白名单，配置变更即失效，TTL 容忍 MCP 热插拔）。
+- 新用例 22/22；既有回归与 audit_44/51/57/58/59 全绿。详见 [changelogs/alpha-0.242.md](changelogs/alpha-0.242.md)。
+
+## alpha-0.241
 
 - **外部工具桥**：「接管改换」也能调用 AstrBot 主链上已激活的工具（MCP 服务器、其它插件注册的工具，例如「为你而在的认知」的文件读写与抓网页）。做法是接线而非复制：并入工具描述 + `ext:` 前缀分流 + 交给 `get_full_tool_set().tool.call()`（**面板里的工具权限照样生效**）+ 代理上下文；开关 `capabilities.astrbot_tools_enabled` **默认关**，可配白名单。新用例 20/20。详见 [changelogs/alpha-0.241.md](changelogs/alpha-0.241.md)。
 

@@ -180,6 +180,8 @@ def _looks_asking_context(text: str) -> bool:
 
 # 0.241：外部工具（AstrBot 主链 / MCP / 其它插件注册的工具）在 tool loop 里的标记前缀
 _EXT_TOOL_PREFIX = "ext:"
+# 0.242：外部工具描述的缓存有效期（秒）。MCP 热插拔最迟在这之后生效。
+_EXT_TOOL_CACHE_TTL = 20.0
 
 
 class _ToolCallContext:
@@ -2676,8 +2678,33 @@ class StorytellerPlugin(Star):
                 polished = ""
         return judged, mark, polished, time.time() - started
 
+    def _polish_skip_reason(self, content: str) -> str:
+        """0.242：判断这条回复是否值得润色。返回空串=需要润色；否则返回跳过原因。
+
+        为什么要有这一步：润色是第二个模型在重写，它看不到人格卡里的"AI 味黑名单"，
+        对「草」「行」「6」这种 1~2 字的群友腔几乎一定会扩写、升华、加语气词。
+        短句本来就已经"像人"了，再润色只会更假，所以短句直接放过。
+        """
+        text = str(content or "").strip()
+        if not text:
+            return "空回复"
+        if not self.config.bool("rewrite.skip_short_enabled", True):
+            return ""
+        try:
+            limit = int(self.config.get("rewrite.skip_short_chars", 12) or 12)
+        except (TypeError, ValueError):
+            limit = 12
+        limit = max(1, min(40, limit))
+        if len(text) <= limit:
+            return f"短句（{len(text)} 字 ≤ {limit} 字）"
+        return ""
+
     async def _polish_safe(self, event: AstrMessageEvent, content: str) -> str:
         """按模板润色一次；空结果视为失败（调用方会用原文）。"""
+        skip = self._polish_skip_reason(content)
+        if skip:
+            logger.debug("[Storyteller] 跳过润色：%s", skip)
+            return ""
         polished = await self.polisher.polish(event, content)
         polished = squeeze_reply(polished)  # 0.186：拍平换行/空行，避免 QQ 大空隙
         return polished if str(polished or "").strip() else ""
@@ -2883,20 +2910,31 @@ class StorytellerPlugin(Star):
             logger.debug("[Storyteller] 取工具管理器失败: %s", exc)
         return None
 
-    def _astrbot_tool_schemas(self) -> list[dict]:
-        """把 AstrBot 已激活工具的描述并入 tools（受开关与白名单约束）。"""
+    def _astrbot_tool_bundle(self) -> tuple[list[dict], set[str]]:
+        """一次性给出（工具描述, 工具名集合），并做短时缓存。
+
+        0.242：此前每次组装 tools、以及每轮 tool loop 都会重新问一遍 AstrBot 的工具集，
+        同一轮里白拿两三次（MCP 工具多时开销更明显）。这里按"开关+白名单"做键、按 TTL 失效：
+        既避免重复取用，又能容忍 MCP 运行时热插拔（最迟 20 秒后生效）。
+        """
         if not self._astrbot_tools_enabled():
-            return []
+            return [], set()
+        allow = self._astrbot_tool_allowlist()
+        key = (True, tuple(sorted(allow)))
+        now = time.monotonic()
+        cache = getattr(self, "_ext_tool_cache", None)
+        if cache and cache[1] == key and (now - cache[0]) < _EXT_TOOL_CACHE_TTL:
+            return cache[2], cache[3]
         manager = self._astrbot_tool_manager()
         if manager is None:
-            return []
+            return [], set()
         try:
             descs = list(manager.get_func_desc_openai_style() or [])
         except Exception as exc:
             logger.warning("[Storyteller] 读取 AstrBot 工具描述失败: %s", exc)
-            return []
-        allow = self._astrbot_tool_allowlist()
-        out: list[dict] = []
+            return [], set()
+        schemas: list[dict] = []
+        names: set[str] = set()
         for item in descs:
             if not isinstance(item, dict):
                 continue
@@ -2906,17 +2944,19 @@ class StorytellerPlugin(Star):
                 continue
             if allow and name not in allow:
                 continue
-            out.append(item)
-        if out:
-            logger.info("[Storyteller] 外部工具已并入本轮 tools: %s", [x["function"]["name"] for x in out])
-        return out
+            schemas.append(item)
+            names.add(name)
+        self._ext_tool_cache = (now, key, schemas, names)
+        if names:
+            logger.info("[Storyteller] 外部工具已就绪: %s", sorted(names))
+        return schemas, names
+
+    def _astrbot_tool_schemas(self) -> list[dict]:
+        """把 AstrBot 已激活工具的描述并入 tools（受开关与白名单约束，带缓存）。"""
+        return self._astrbot_tool_bundle()[0]
 
     def _astrbot_tool_names(self) -> set[str]:
-        return {
-            str((item.get("function") or {}).get("name") or "")
-            for item in self._astrbot_tool_schemas()
-            if (item.get("function") or {}).get("name")
-        }
+        return set(self._astrbot_tool_bundle()[1])
 
     async def _call_astrbot_tool(self, name: str, args: dict, event: Any) -> dict:
         """执行一个 AstrBot 工具（MCP / 其它插件 / 主链工具），返回统一结果字典。"""
