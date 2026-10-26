@@ -184,6 +184,51 @@ _EXT_TOOL_PREFIX = "ext:"
 _EXT_TOOL_CACHE_TTL = 20.0
 
 
+def _repeat_verdict(count: int) -> tuple[str, str, bool]:
+    """0.243：根据"同一工具+同一参数"的累计调用次数，决定怎么处理。
+
+    返回 (给模型的提示, 拒绝消息, 是否停止循环)：
+    - 第 1 次：("", "", False)     正常执行
+    - 第 2 次：("提示", "", False)  照常执行，但在结果里提醒"结果会一样"
+    - 第 3 次起：("", "拒绝消息", True) 不再执行，并让循环收尾
+
+    为什么第 3 次才停：模型有时需要重试一次（比如文件刚被别的东西占用），
+    但连着三次同样的调用几乎必然是原地打转，再重试只是烧 token。
+    """
+    n = int(count or 0)
+    if n <= 1:
+        return "", "", False
+    if n == 2:
+        return "（重复：刚才已用同样参数调过一次，结果会一样；别再用这个办法）", "", False
+    return (
+        "",
+        "同一工具同一个参数已经调过三次，结果不会变。别再重复了，"
+        "基于已有结果收尾，或者换个完全不同的办法。",
+        True,
+    )
+
+
+def _truncate_keep_ends(text: str, limit: int = 4000, head_ratio: float = 0.7) -> str:
+    """0.243：长文本截断时**保留首尾**，中间省略。
+
+    为什么不能只砍尾巴：工具输出里最关键的东西常在结尾（异常堆栈最后一行、
+    "共 N 条"、保存路径），只保留开头会让模型看不到结果，从而误判成没做成。
+    """
+    raw = str(text or "")
+    if limit <= 0 or len(raw) <= limit:
+        return raw
+    head_len = max(1, int(limit * max(0.1, min(0.9, head_ratio))))
+    tail_len = max(1, limit - head_len)
+    omitted = len(raw) - head_len - tail_len
+    if omitted <= 0:
+        return raw[:limit]
+    return (
+        raw[:head_len]
+        + f"\n…（中间省略 {omitted} 字）…\n"
+        + raw[-tail_len:]
+    )
+
+
 class _ToolCallContext:
     """给 AstrBot 工具执行用的上下文代理。
 
@@ -2258,6 +2303,20 @@ class StorytellerPlugin(Star):
                 final_system = _re.sub(r"\n{3,}", "\n\n", str(final_system or ""))
             except Exception:
                 pass
+            # 0.243：任务执行守则——只在"能用外部工具"时注入，否则她没有动手能力，说了也没用
+            try:
+                if self._astrbot_tools_enabled() and self.config.bool(
+                    "capabilities.work_rules_enabled", True
+                ):
+                    final_system += (
+                        "\n\n【工具与任务】"
+                        "\n- 要做的事涉及文件/网页/文档/数据时，先想清步骤，一步一步来：做一步、看结果，再决定下一步。"
+                        "\n- 工具返回失败时，读错误原文再改一版重试；不要用同样的参数反复调同一个工具。"
+                        "\n- 产出文件（文档/表格/幻灯片）之后，用 toolbox_send_file 发给对方，别只说「已经做好了」。"
+                        "\n- 中间过程不要发给群里，只在最后说结论。"
+                    )
+            except Exception as exc:
+                logger.debug("[Storyteller] 注入任务守则失败（忽略）: %s", exc)
             # 0.168 连发接住：对方一句话内连续输入多条（如"hmmm/这么冷淡/你在干嘛"合并），
             # 模型易只挑情绪重的一句、漏掉问句——补一句"都接住，先回最后的问句"
             try:
@@ -2296,7 +2355,7 @@ class StorytellerPlugin(Star):
             attempt = 0
             # 0.197：能力执行轮次（模型请求能力 → 执行 → 结果回灌再生成），与打断合并共用同一循环
             cap_round = 0
-            cap_max_rounds = max(0, min(4, self.config.int("capabilities.max_rounds", 1)))
+            cap_max_rounds = max(0, min(8, self.config.int("capabilities.max_rounds", 1)))
             _last_inner = ""  # 0.204：本轮最后一段"没说出口的思绪"（能力/打断重生成时取最新一次）
             _round_t0 = time.time()  # 0.207：本轮耗时观测（生成/判定+表情包/润色）
             while True:
@@ -2982,7 +3041,7 @@ class StorytellerPlugin(Star):
             logger.warning("[Storyteller] 外部工具执行失败 %s: %s", name, exc)
             return {"ok": False, "status": "error", "message": f"{type(exc).__name__}: {str(exc)[:160]}"}
         text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, default=str)
-        return {"ok": True, "status": "ok", "tool": name, "result": (text or "")[:4000]}
+        return {"ok": True, "status": "ok", "tool": name, "result": _truncate_keep_ends(text, 4000)}
 
     async def _generate_tool_loop(
         self,
@@ -3007,7 +3066,7 @@ class StorytellerPlugin(Star):
         if accept_sys and str(final_system or "").strip():
             messages.append({"role": "system", "content": str(final_system)})
         messages.append({"role": "user", "content": str(call_prompt)})
-        rounds = max(0, min(4, int(max_rounds or 0)))
+        rounds = max(0, min(8, int(max_rounds or 0)))
         allowed = {str((tool.get("function") or {}).get("name") or "") for tool in tools}
         # 0.213：只读能力并发开关（默认开）
         try:
@@ -3018,12 +3077,16 @@ class StorytellerPlugin(Star):
         marks = []
         input_other = input_cached = output = 0
         resp: Any = None
+        # 0.243：防打转——同一工具 + 同一参数的重复调用计数（本次任务内有效）
+        seen_calls: dict[str, int] = {}
+        repeat_hints: dict[int, str] = {}
+        stop_loop = False
         for i in range(rounds + 1):
             try:
                 resp = await chat_with_tools(
                     provider, self.config, messages=messages, tools=tools,
                     timeout=90, disable_thinking=True,
-                    tool_choice="none" if i >= rounds else "auto",
+                    tool_choice="none" if (i >= rounds or stop_loop) else "auto",
                 )
             except Exception:
                 if not results:
@@ -3074,15 +3137,37 @@ class StorytellerPlugin(Star):
                 # 0.241：外部工具用 ext: 前缀分流，不走 capabilities.dispatch
                 if name in ext_tool_names:
                     cap_name = _EXT_TOOL_PREFIX + name
-                if index >= 3:
+                # 0.243：同一工具 + 同一参数重复调用 → 第 2 次提醒、第 3 次收敛
+                repeat_key = ""
+                repeat_count = 0
+                if payload is not None and name:
+                    try:
+                        repeat_key = name + "|" + _json.dumps(payload, sort_keys=True, ensure_ascii=False)
+                    except Exception:
+                        repeat_key = name
+                if repeat_key:
+                    repeat_count = seen_calls.get(repeat_key, 0) + 1
+                    seen_calls[repeat_key] = repeat_count
+                _hint, _reject, _stop = _repeat_verdict(repeat_count)
+                if _stop:
+                    stop_loop = True
+                    planned.append((
+                        index, "",
+                        {"ok": False, "status": "repeated", "message": _reject},
+                    ))
+                elif index >= 3:
                     planned.append((index, "", {"ok": False, "status": "limited", "message": "本轮最多执行三个能力"}))
                 elif name not in allowed:
                     planned.append((index, "", {"ok": False, "status": "forbidden", "message": "本轮未提供这个工具"}))
                 elif payload is None:
                     planned.append((index, "", {"ok": False, "status": "error", "message": "工具参数不是有效 JSON 对象"}))
                 elif parallel_ro and cap_is_readonly(cap_name):
+                    if _hint:
+                        repeat_hints[index] = _hint
                     ro_planned.append((index, cap_name, payload))
                 else:
+                    if _hint:
+                        repeat_hints[index] = _hint
                     planned.append((index, cap_name, payload))
             # 只读的并发跑（只有一个时没必要并发）；写类逐条 await
             if len(ro_planned) >= 2:
@@ -3106,6 +3191,11 @@ class StorytellerPlugin(Star):
                     result = await cap_dispatch(self, event, cap_name, payload_or_result)
                 else:
                     result = payload_or_result
+                hint = repeat_hints.get(index, "")
+                if hint and isinstance(result, dict):
+                    merged = dict(result)
+                    merged["message"] = (str(merged.get("message") or "") + " " + hint).strip()
+                    result = merged
                 results.append(result)
                 mark = str(result.get("mark") or "")
                 if mark and mark not in marks:
