@@ -2,7 +2,14 @@
 
 完整按版本日志见 [changelogs/](changelogs/) 目录。
 
-## alpha-0.243（当前）
+## alpha-0.244（当前）
+
+- **打转计数跨轮累计**（按会话保存在实例上），不再因 `cap_round` 重启被清零。
+- **历史工具结果自动压缩**：保留最近 6 条完整，更早的压成一行摘要，避免 8 轮后撑爆上下文。
+- 修掉 `_compact_tool_messages` 缺 `import json` 的真 bug（一压缩就 NameError）。
+- 新增 `audit_63` 真驱动 tool loop（15/15）。详见 [changelogs/alpha-0.244.md](changelogs/alpha-0.244.md)。
+
+## alpha-0.243
 
 - **轮次上限 4 → 8**（接管链路与 tool loop 两处都改），复杂任务能多走几步。
 - **防打转**：同一工具+同一参数，第 2 次照跑但提示，第 3 次不再执行并让模型基于已有结果收尾（`_repeat_verdict` 纯函数）。

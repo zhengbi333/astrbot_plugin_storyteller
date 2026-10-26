@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import importlib
 import re
 import time
@@ -182,6 +183,43 @@ def _looks_asking_context(text: str) -> bool:
 _EXT_TOOL_PREFIX = "ext:"
 # 0.242：外部工具描述的缓存有效期（秒）。MCP 热插拔最迟在这之后生效。
 _EXT_TOOL_CACHE_TTL = 20.0
+
+
+def _compact_tool_messages(messages: list[dict], keep_recent: int = 6, summary_chars: int = 120) -> int:
+    """1.2：把**较早**的工具结果压成一行摘要，保留最近 keep_recent 条完整。
+
+    为什么：8 轮、每轮最多 3 个工具，工具结果会越堆越多（单条最多 4000 字），
+    既贵又会把人格与当前对话挤出去。压缩后模型仍知道"之前做过什么"，但不再占满窗口。
+    返回被压缩的条数。
+    """
+    indices = [i for i, msg in enumerate(messages) if isinstance(msg, dict) and msg.get("role") == "tool"]
+    if len(indices) <= keep_recent:
+        return 0
+    compacted = 0
+    for i in indices[:-keep_recent]:
+        msg = messages[i]
+        raw = str(msg.get("content") or "")
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            data = None
+        if isinstance(data, dict) and data.get("compacted"):
+            continue
+        if isinstance(data, dict):
+            head = str(data.get("message") or data.get("result") or "").strip()
+            brief = {
+                "ok": data.get("ok"),
+                "status": data.get("status"),
+                "compacted": True,
+                "message": (head[:summary_chars] + "…") if len(head) > summary_chars else head,
+            }
+            msg["content"] = json.dumps(brief, ensure_ascii=False)
+        else:
+            msg["content"] = json.dumps(
+                {"compacted": True, "message": raw[:summary_chars]}, ensure_ascii=False
+            )
+        compacted += 1
+    return compacted
 
 
 def _repeat_verdict(count: int) -> tuple[str, str, bool]:
@@ -2949,6 +2987,14 @@ class StorytellerPlugin(Star):
         )
 
     # ------------------------------------------------------------ 外部工具桥（0.241）
+    def _repeat_seen_map(self) -> dict[str, dict[str, int]]:
+        """1.1：会话 → {调用指纹: 次数}。懒创建，避免 __init__ 顺序问题。"""
+        store = getattr(self, "_repeat_seen", None)
+        if store is None:
+            store = {}
+            self._repeat_seen = store
+        return store
+
     def _astrbot_tools_enabled(self) -> bool:
         try:
             return bool(self.config.bool("capabilities.astrbot_tools_enabled", False))
@@ -3077,8 +3123,14 @@ class StorytellerPlugin(Star):
         marks = []
         input_other = input_cached = output = 0
         resp: Any = None
-        # 0.243：防打转——同一工具 + 同一参数的重复调用计数（本次任务内有效）
-        seen_calls: dict[str, int] = {}
+        # 0.244：防打转计数按会话保留，**跨 cap_round 重启累计**（否则每轮重新计，保护被稀释）
+        _session_key = str(getattr(event, "unified_msg_origin", "") or "")
+        try:
+            seen_calls = self._repeat_seen_map().setdefault(_session_key, {})
+            if len(seen_calls) > 200:  # 防无限增长
+                seen_calls.clear()
+        except Exception:
+            seen_calls = {}
         repeat_hints: dict[int, str] = {}
         stop_loop = False
         for i in range(rounds + 1):
@@ -3206,6 +3258,13 @@ class StorytellerPlugin(Star):
                     "role": "tool", "tool_call_id": str(call.get("id") or ""),
                     "content": _json.dumps(result, ensure_ascii=False, default=str),
                 })
+            # 1.2：本轮结果已回填，顺手把更早的工具结果压成摘要（保留最近两轮完整）
+            try:
+                _n = _compact_tool_messages(messages, keep_recent=6)
+                if _n:
+                    logger.debug("[Storyteller] 已压缩 %s 条历史工具结果", _n)
+            except Exception as exc:
+                logger.debug("[Storyteller] 压缩历史结果失败（忽略）: %s", exc)
         if resp is None:
             resp = types.SimpleNamespace(completion_text="", usage=None)
         text = str(getattr(resp, "completion_text", "") or "")
