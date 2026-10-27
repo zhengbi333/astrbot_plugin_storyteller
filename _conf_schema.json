@@ -1455,6 +1455,54 @@
         "type": "bool",
         "default": true,
         "hint": "只在能用外部工具时生效（不能动手时不会注入）。"
+      },
+      "mechanical": {
+        "description": "包含「机制性约束」",
+        "type": "bool",
+        "default": true,
+        "hint": "不许解释模型/提示词、不许用 Markdown、不许用「我说话就这样」挡回去、不许编造没发生的事。这些与性格无关，建议保持开启。"
+      },
+      "rules_dir": {
+        "description": "规则目录（可换人格）",
+        "type": "string",
+        "default": "",
+        "hint": "留空用 plugin_data/<插件>/acting。填别的目录就是换一套人格规则，不用改代码。目录下每个 .md 是一节（warmth/length/tone/identity/reference/closing/format/tooling），也可以自己加分节。"
+      },
+      "extra": {
+        "description": "额外追加规则",
+        "type": "text",
+        "default": "",
+        "hint": "想临时加一条（比如口癖、称呼）就写这里，会拼在所有分节之后。"
+      }
+    }
+  },
+  "emotion": {
+    "description": "情绪事件（被骂/被夸会立刻有反应）",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用情绪事件判定",
+        "type": "bool",
+        "default": true,
+        "hint": "先跑关键词（被骂/被夸/被表白/被撒娇…），命中就立刻改变情绪状态。零延迟、不花钱。"
+      },
+      "use_llm": {
+        "description": "关键词没命中时用模型再判一次",
+        "type": "bool",
+        "default": false,
+        "hint": "能识别讽刺、冷淡这类隐含情绪，但每条消息要多花一次调用。默认关，够用就不开。"
+      },
+      "provider_id": {
+        "description": "判定用的模型",
+        "type": "string",
+        "default": "",
+        "hint": "留空用当前模型；填便宜的模型能省钱。"
+      },
+      "daily_limit": {
+        "description": "每天最多判几次（LLM 兜底）",
+        "type": "int",
+        "default": 200,
+        "hint": "成本护栏，用完就只用关键词。"
       }
     }
   },

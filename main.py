@@ -11,6 +11,7 @@ import json
 
 from . import acting as acting_mod
 from . import context_budget as budget_mod
+from . import emotion_events as emotion_mod
 import importlib
 import re
 import time
@@ -658,6 +659,21 @@ class StorytellerPlugin(Star):
 
     @filter.on_llm_request(priority=10000)
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
+        # 0.250：先看这句是不是"情绪事件"（被骂/被夸/被表白…）→ 立刻改状态，
+        # 而不是等十几分钟慢慢漂。关键词同步判，零延迟；LLM 兜底见 _apply_emotion_event_llm。
+        try:
+            _raw = str(getattr(req, "prompt", "") or "")
+            if self.config.bool("emotion.enabled", True) and _raw:
+                _who = ""
+                try:
+                    _who = str(event.get_sender_id() or "")
+                except Exception:
+                    _who = ""
+                self._apply_emotion_event(event, _raw, user=_who)
+                if self.config.bool("emotion.use_llm", False):
+                    asyncio.create_task(self._apply_emotion_event_llm(event, _raw))
+        except Exception as _emo_exc:
+            logger.debug("[Storyteller] 情绪事件入口失败（忽略）: %s", _emo_exc)
         """主链 LLM 请求前的介入（priority=10000 先于【为你篆刻的历史】插件的注入 -20 执行）。
 
         介入方式（拦截参与总开关开启时，按 intercept.mode）：
@@ -3501,6 +3517,58 @@ class StorytellerPlugin(Star):
         except Exception as exc:
             logger.warning("[Storyteller] 外部事件记忆写入失败: %s", exc)
             return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+    def _emotion_budget(self) -> Any:
+        if getattr(self, "_emotion_budget_obj", None) is None:
+            self._emotion_budget_obj = emotion_mod.CallBudget(
+                daily_limit=self.config.int("emotion.daily_limit", 200)
+            )
+        return self._emotion_budget_obj
+
+    def _apply_emotion_event(self, event: Any, text: str, *, user: str = "") -> str:
+        """关键词秒判情绪事件并写入 presence（同步、零延迟）。返回事件名。"""
+        try:
+            verdict = emotion_mod.judge_keywords_only(text)
+            if not verdict.is_event:
+                return ""
+            presence = self.presence.load()
+            emotion_mod.apply_to_presence(presence, verdict)
+            self.presence.save(presence)
+            logger.info("[Storyteller] 情绪事件：%s（%s）", verdict.describe(), user or "-")
+            return verdict.event
+        except Exception as exc:
+            logger.debug("[Storyteller] 情绪事件失败（忽略）: %s", exc)
+            return ""
+
+    async def _apply_emotion_event_llm(self, event: Any, text: str) -> str:
+        """关键词没命中时的 LLM 兜底（可选、异步、有日额度）。"""
+        try:
+            if not self.config.bool("emotion.use_llm", False):
+                return ""
+            provider_id = str(self.config.get("emotion.provider_id", "") or "").strip()
+            provider = None
+            try:
+                if provider_id:
+                    provider = self.context.get_provider_by_id(provider_id)
+                if provider is None:
+                    provider = self.context.get_using_provider()
+            except Exception:
+                provider = None
+            if provider is None:
+                return ""
+            verdict = await emotion_mod.judge_with_llm(
+                provider, text, budget=self._emotion_budget()
+            )
+            if not verdict.is_event:
+                return ""
+            presence = self.presence.load()
+            emotion_mod.apply_to_presence(presence, verdict)
+            self.presence.save(presence)
+            logger.info("[Storyteller] 情绪事件（LLM）：%s", verdict.describe())
+            return verdict.event
+        except Exception as exc:
+            logger.debug("[Storyteller] LLM 情绪判定失败（忽略）: %s", exc)
+            return ""
 
     async def _memory_is_duplicate(
         self, bridge: Any, content: str, session_context: Any, *, threshold: float = 0.6,
