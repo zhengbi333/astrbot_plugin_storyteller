@@ -301,7 +301,24 @@ async def chat_with_tools(
 
     info = _extract_openai_direct(provider)
     if info is None:
-        raise _DirectUnavailable("提取不到 OpenAI 兼容直连信息")
+        # 0.258：这条路失败就退回不带工具的通道 —— 必须留下证据，否则没人知道她为什么不会干活
+        try:
+            client = getattr(provider, "client", None)
+            got = {
+                "client": client is not None,
+                "base_url": bool(str(getattr(client, "base_url", "") or "").strip()) if client else False,
+                "api_key": bool(str(getattr(client, "api_key", "") or "").strip()) if client else False,
+                "api_version": bool(str(getattr(client, "api_version", "") or "").strip()) if client else False,
+            }
+            detail = f"直连不可用: {got}"
+        except Exception as exc:
+            detail = f"直连不可用（读 provider 失败）: {exc}"
+        try:
+            from .main import _diag as _plug_diag
+            _plug_diag(detail)
+        except Exception:
+            pass
+        raise _DirectUnavailable(detail)
     if not tools:
         # 0.257：这里原来抛 _ToolsUnsupported，等于把「这次没工具」误判成
         # 「provider 不支持 tools」，调用方会置永久降级 —— 此后她再也没有工具，

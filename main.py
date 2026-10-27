@@ -80,6 +80,31 @@ def _data_directory() -> Path:
     return directory
 
 
+_TOOL_USAGE_RULES = """【怎么用工具】
+- 有工具能做的事，就调工具，不要凭印象直接答。要文件、要数据、要查证，都先调。
+- 用户要**文件**（文档/表格/报告/纪要/清单/Word/Excel/PDF）时，产出物必须是文件：
+  用写文档的工具写出来，再用发文件的工具发出去。**画图不是文件**，表情包也不是。
+- 用户要**看画面**（「画一张」「拍张照片」「给我看看你」）时才用画图/拍照。
+- 工具报错就按错误原文改一版重试；连续两次同样的错，停下来如实告诉对方卡在哪。
+- 工具参数里不确定的路径先列目录确认，别猜。
+- 做完之后用一句话说结果就行，不要把工具返回的原始内容整段贴出来。"""
+
+
+def _diag(message: str) -> None:
+    """把关键链路事件写进数据目录的 _diag.log（工程师能直接读，不依赖 GUI 日志）。"""
+    try:
+        path = _data_directory() / "_diag.log"
+        line = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) + "  " + str(message) + "\n"
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line)
+        # 超过 200KB 就截掉前半，避免无限增长
+        if path.stat().st_size > 200 * 1024:
+            body = path.read_text(encoding="utf-8", errors="replace")
+            path.write_text(body[-80_000:], encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _hhmm() -> str:
     return time.strftime("%H:%M", time.localtime())
 
@@ -2432,6 +2457,12 @@ class StorytellerPlugin(Star):
                 )
                 if _acting:
                     final_system += "\n\n" + _acting
+                # 0.259：工具使用规范（照 DSH 系统提示的写法：通用规则，不是关键词表）
+                try:
+                    if self._astrbot_tools_enabled() or self.config.bool("capabilities.enabled", True):
+                        final_system += "\n\n" + _TOOL_USAGE_RULES
+                except Exception as _tr_exc:
+                    logger.debug("[Storyteller] 注入工具规范失败（忽略）: %s", _tr_exc)
             except Exception as exc:
                 logger.debug("[Storyteller] 注入扮演守则失败（忽略）: %s", exc)
             # 0.168 连发接住：对方一句话内连续输入多条（如"hmmm/这么冷淡/你在干嘛"合并），
@@ -2495,7 +2526,17 @@ class StorytellerPlugin(Star):
                                 logger.warning("[Storyteller] 并入外部工具失败（忽略）: %s", _ext_exc)
                     except Exception as _texc:
                         logger.warning("[Storyteller] 工具 schema 生成失败（改用文本协议）: %s", _texc)
+                        _diag(f"工具schema生成失败: {type(_texc).__name__}: {_texc}")
                         _cap_tools = []
+                    try:
+                        _diag(
+                            "生成前: tools=%d unsupported=%s retry_at=%.0f model=%s"
+                            % (len(_cap_tools), self._native_tools_unsupported,
+                               getattr(self, "_native_tools_retry_at", 0.0),
+                               str(getattr(getattr(provider, "meta", None), "model", "?")))
+                        )
+                    except Exception:
+                        pass
                     resp = await self._generate_once(
                         provider, final_system, call_prompt, call_kwargs, accept_sys,
                         event, _cap_tools, cap_max_rounds,
@@ -3055,6 +3096,10 @@ class StorytellerPlugin(Star):
                     timeout=150,
                 )
             except _ToolsUnsupported as exc:
+                try:
+                    _diag(f"降级触发(_ToolsUnsupported): {str(exc)[:160]}")
+                except Exception:
+                    pass
                 # 0.200：提供方拒绝原生工具 → 降级（本进程内）
                 # 0.257：改成带冷却的降级 —— 10 分钟后自动重试，不再等重启
                 self._native_tools_unsupported = True
