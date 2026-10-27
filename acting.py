@@ -18,7 +18,19 @@ from pathlib import Path
 from typing import Any
 
 MAX_RULE_CHARS = 1200
-DEFAULT_SECTION_ORDER = ("warmth", "length", "tone", "identity", "reference", "closing", "examples", "format", "tooling")
+# 注入顺序（2026-10-27 重排）：逻辑流 = 我是谁 → 怎么对她 → 怎么说话 → 细节禁忌 → 工具。
+# 旧顺序把 identity 排在第 4，模型先读到"温度/长度"再读到"我是谁"，人格锚被稀释。
+DEFAULT_SECTION_ORDER = (
+    "identity",    # 1 我是谁（最基础，必须最先）
+    "warmth",      # 2 对她的态度温度
+    "tone",        # 3 说话方式
+    "length",      # 4 长度与节奏
+    "reference",   # 5 称呼与引用
+    "examples",    # 6 好坏对照（示范比规则有效）
+    "format",      # 7 格式禁忌
+    "closing",     # 8 收尾方式
+    "tooling",     # 9 工具使用（只在能动手时）
+)
 
 # 机制性约束：与性格无关，任何人格都必须遵守
 MECHANICAL_RULES: list[str] = [
@@ -323,4 +335,7 @@ def preview(plugin: Any) -> dict[str, Any]:
         "chars": len(text),
         "mechanical": len(MECHANICAL_RULES),
         "text": text[:3000],
+        # 每节原文（面板逐节编辑用）与注入顺序
+        "texts": dict(rules.sections),
+        "order": list(DEFAULT_SECTION_ORDER),
     }

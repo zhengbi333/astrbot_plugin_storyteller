@@ -200,6 +200,8 @@ class StorytellerWebApi:
             (f"{prefix}/appearance/background/select", self.appearance_background_select, ["POST"], "Storyteller background select"),
             (f"{prefix}/appearance/background/clear", self.appearance_background_clear, ["POST"], "Storyteller background clear"),
             (f"{prefix}/judge/stats", self.judge_stats, ["GET"], "Storyteller judge stats"),
+        (f"{prefix}/acting/sections", self.acting_sections, ["GET"], "Storyteller acting sections"),
+        (f"{prefix}/acting/save", self.acting_save, ["POST"], "Storyteller save acting section"),
             (f"{prefix}/config/schema", self.config_schema, ["GET"], "Storyteller config schema"),
             (f"{prefix}/config/module/update", self.config_module_update, ["POST"], "Storyteller config module update"),
             (f"{prefix}/config/module/reset", self.config_module_reset, ["POST"], "Storyteller config module reset"),
@@ -383,6 +385,74 @@ class StorytellerWebApi:
             })
         except Exception as exc:
             return await _fail(f"读取判定状态失败：{type(exc).__name__}: {exc}")
+
+    # ------------------------------------------------------------- 守则（acting）
+
+    async def acting_sections(self) -> Any:
+        """守则的 9 节：标题、说明、顺序、是否启用、当前内容。
+
+        前端用它渲染「点击展开 → 单独编辑 → 自动保存」的界面。
+        顺序由后端给定（逻辑流），前端不改顺序。
+        """
+        try:
+            from . import acting as acting_mod
+
+            plugin = self._plugin
+            info = acting_mod.preview(plugin)
+            order = list(getattr(acting_mod, "DEFAULT_SECTION_ORDER", ()) or ())
+            meta = {
+                "identity": ("我是谁", "身份锚：你是谁、不是谁、别认错人。人格卡写什么这里就填什么。"),
+                "warmth": ("态度温度", "对这个人该多热/多冷。跟关系值走，但别只靠关系值。"),
+                "tone": ("说话方式", "句长、语气词、标点习惯、要不要用书面词。"),
+                "length": ("长度与节奏", "一句话还是两句、要不要分条发、什么时候该短。"),
+                "reference": ("称呼与引用", "怎么称呼对方、能不能复述对方的话。"),
+                "examples": ("好坏对照", "「坏例子 vs 好例子」示范，专治客服腔。示范比规则有效。"),
+                "format": ("格式禁忌", "不用 Markdown、不用列表、不堆书面连接词。"),
+                "closing": ("收尾方式", "说完就停，还是留一句话头。"),
+                "tooling": ("工具使用", "只在能动手时注入：什么时候调工具、什么时候别调。"),
+            }
+            sections = []
+            for name in order:
+                title, desc = meta.get(name, (name, ""))
+                sections.append({
+                    "key": name,
+                    "title": title,
+                    "desc": desc,
+                    "enabled": True,
+                    "chars": len(str(info.get("texts", {}).get(name, "")) or ""),
+                    "content": str(info.get("texts", {}).get(name, "") or ""),
+                })
+            return await _ok({
+                "sections": sections,
+                "mechanical": info.get("mechanical", 0),
+                "total_chars": info.get("chars", 0),
+                "dir": str(info.get("dir", "")),
+            })
+        except Exception as exc:
+            return await _fail(f"读取守则失败：{type(exc).__name__}: {exc}")
+
+    async def acting_save(self, payload: Any = None) -> Any:
+        """保存某一节守则（前端自动保存用）。只写 acting/<节名>.md，不碰配置。"""
+        try:
+            from . import acting as acting_mod
+
+            body = payload if isinstance(payload, dict) else {}
+            key = str(body.get("key") or "").strip()
+            content = str(body.get("content") or "")
+            allowed = set(getattr(acting_mod, "DEFAULT_SECTION_ORDER", ()) or ())
+            if key not in allowed:
+                return await _fail(f"没有这一节：{key}")
+            plugin = self._plugin
+            folder = acting_mod.ensure_defaults(plugin) if hasattr(acting_mod, "ensure_defaults") else None
+            target = Path(str(folder or acting_mod.preview(plugin).get("dir"))) / f"{key}.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            backup = target.with_suffix(".md.bak")
+            if target.is_file():
+                backup.write_text(target.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+            target.write_text(content, encoding="utf-8")
+            return await _ok({"key": key, "chars": len(content), "path": str(target)})
+        except Exception as exc:
+            return await _fail(f"保存守则失败：{type(exc).__name__}: {exc}")
 
     # ------------------------------------------------------------- 外观
 

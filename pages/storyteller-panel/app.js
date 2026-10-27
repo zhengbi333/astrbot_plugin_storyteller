@@ -26,6 +26,7 @@ const NAV = [
   { key: "emoji", label: "表情包" },
   { key: "token", label: "Token" },
   { key: "settings", label: "设置" },
+  { key: "acting", label: "守则" },
   { key: "judge", label: "判定" },
   { key: "debug", label: "调试" },
   { key: "thanks", label: "鸣谢" },
@@ -56,6 +57,7 @@ const TITLES = {
   emoji: ["表情包", "本地图库与分类"],
   token: ["Token 用量", "总 / 当天 / 当月 / 每模型"],
   settings: ["设置", "插件开关与界面偏好"],
+  acting: ["守则", "九节扮演守则：点开任意一节就能改，停止输入 0.8 秒自动保存"],
   judge: ["判定", "每个判定点用哪个模型、调了几次、退化成规则的比例（规矩 R6）"],
   debug: ["插件调试", "运行时日志与诊断"],
   thanks: ["鸣谢", "创作者与测试伙伴"],
@@ -707,6 +709,7 @@ async function render() {
     if (state.current === "emoji") renderEmoji().catch((err) => diagLog(`表情包页异常: ${err.message}`));
     if (state.current === "token") renderToken().catch((err) => diagLog(`Token页异常: ${err.message}`));
     if (state.current === "settings") renderSettings().catch((err) => diagLog(`设置页异常: ${err.message}`));
+    if (state.current === "acting") renderActing().then(bindActingEditors).catch((err) => diagLog(`守则页异常: ${err.message}`));
     if (state.current === "judge") renderJudge().catch((err) => diagLog(`判定页异常: ${err.message}`));
     if (state.current === "debug") renderDebug().catch((err) => diagLog(`调试页异常: ${err.message}`));
     if (state.current === "thanks") renderThanks();
@@ -4325,6 +4328,72 @@ function bindSettingsEvents() {
 }
 
 /* 调试页：子选项卡（诊断 / 拦截与改换） */
+// 守则：九节，点击标题展开单节编辑框；停止输入 800ms 自动保存
+const actingSaveTimers = {};
+async function renderActing() {
+  const data = await apiGet("acting/sections");
+  const rows = (data && data.sections) || [];
+  if (!rows.length) {
+    return '<div class="empty">读不到守则（acting 目录可能不存在）</div>';
+  }
+  let html = '<div class="grid">' +
+    `<div class="cell"><div class="k">守则节数</div><div class="v big">${rows.length}</div></div>` +
+    `<div class="cell"><div class="k">机制硬规则</div><div class="v big">${data.mechanical}</div></div>` +
+    `<div class="cell"><div class="k">注入总字数</div><div class="v big accent">${data.total_chars}</div></div>` +
+    `<div class="cell"><div class="k">目录</div><div class="v" style="font-size:11px;word-break:break-all">${esc(data.dir || "")}</div></div>` +
+    '</div>';
+  html += '<div class="sect"><h3>九节（数字 = 注入顺序）</h3><div class="rule"></div></div><div class="list">';
+  rows.forEach((r, i) => {
+    html += `<div class="acting-row" data-key="${esc(r.key)}">
+      <div class="id">${String(i + 1).padStart(2, "0")}</div>
+      <div class="main">
+        <div class="t" style="cursor:pointer">${esc(r.title)} <span class="tag">${esc(r.key)}</span> ▾</div>
+        <div class="d">${esc(r.desc || "")}</div>
+        <div class="acting-editor" hidden>
+          <textarea class="acting-text" data-key="${esc(r.key)}" rows="12" style="width:100%;margin-top:8px;font-family:inherit;font-size:13px;line-height:1.6;background:rgba(255,255,255,.04);color:inherit;border:1px solid rgba(255,255,255,.12);border-radius:6px;padding:10px">${esc(r.content || "")}</textarea>
+          <div class="acting-status" style="font-size:11px;opacity:.6;margin-top:4px">改动后自动保存</div>
+        </div>
+      </div>
+      <div class="r">${r.chars} 字</div>
+    </div>`;
+  });
+  html += "</div>";
+  return html;
+}
+
+function bindActingEditors() {
+  document.querySelectorAll(".acting-row").forEach((row) => {
+    const head = row.querySelector(".main > .t");
+    const editor = row.querySelector(".acting-editor");
+    if (!head || !editor) return;
+    head.addEventListener("click", () => {
+      editor.hidden = !editor.hidden;
+      if (!editor.hidden) {
+        const ta = editor.querySelector("textarea");
+        if (ta) ta.focus();
+      }
+    });
+  });
+  document.querySelectorAll(".acting-text").forEach((ta) => {
+    ta.addEventListener("input", () => {
+      const key = ta.getAttribute("data-key");
+      const status = ta.parentElement.querySelector(".acting-status");
+      if (status) status.textContent = "未保存…";
+      clearTimeout(actingSaveTimers[key]);
+      actingSaveTimers[key] = setTimeout(async () => {
+        try {
+          await apiPost("acting/save", { key, content: ta.value });
+          if (status) status.textContent = `已保存（${ta.value.length} 字）`;
+          const badge = ta.closest(".acting-row").querySelector(".r");
+          if (badge) badge.textContent = `${ta.value.length} 字`;
+        } catch (err) {
+          if (status) status.textContent = `保存失败：${err.message}`;
+        }
+      }, 800);
+    });
+  });
+}
+
 async function renderJudge() {
   const data = await apiGet("judge/stats");
   const rows = (data && data.judges) || [];

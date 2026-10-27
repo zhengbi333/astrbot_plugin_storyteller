@@ -126,6 +126,7 @@ TEMPLATE_PLACEHOLDERS: dict[str, str] = {
     "search_result": "{搜索结果}",
     "time": "{时间}",
     "reply": "{回复}",
+    "acting": "{守则}",
 }
 
 # 占位符作用域：只对**特定模板**有意义的占位符（其余两个模板都有效）。

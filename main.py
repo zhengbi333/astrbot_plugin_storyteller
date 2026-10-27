@@ -2239,6 +2239,14 @@ class StorytellerPlugin(Star):
             session_id = str(getattr(event, "unified_msg_origin", "") or "")
             template = str(self.config.get("intercept.template", "") or "")
             anchors = self._anchor_values(event)
+            # {守则}：模板里写了就用这个占位符定位；没写由后面追加（老行为不变）
+            try:
+                if "{守则}" in template:
+                    anchors["acting"] = acting_mod.build_guidance(
+                        self, with_tooling=self._astrbot_tools_enabled()
+                    )
+            except Exception as _act_exc:
+                logger.debug("[Storyteller] {守则} 取值失败: %s", _act_exc)
             anchors["current_text"] = prompt or user_text or "（对方没有说话）"
             anchors["context"] = self._recent_timeline_text(
                 session_id, limit=max(0, min(12, self.config.int("intercept.context_count", 4))),
@@ -2524,7 +2532,11 @@ class StorytellerPlugin(Star):
                     self, with_tooling=self._astrbot_tools_enabled()
                 )
                 if _acting:
-                    final_system += "\n\n" + _acting
+                    # 0.264：模板里写了 {守则} 就由占位符摆放，不再追加到末尾（避免重复两遍）
+                    if "{守则}" in str(self.config.get("intercept.template", "") or ""):
+                        logger.debug("[Storyteller] 模板含 {守则}，跳过末尾追加")
+                    else:
+                        final_system += "\n\n" + _acting
                 # 0.259：工具使用规范（照 DSH 系统提示的写法：通用规则，不是关键词表）
                 try:
                     if self._astrbot_tools_enabled() or self.config.bool("capabilities.enabled", True):
