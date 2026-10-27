@@ -1506,6 +1506,18 @@
       }
     }
   },
+  "recall": {
+    "description": "撤回（说错了能收回来）",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用撤回",
+        "type": "bool",
+        "default": false,
+        "hint": "只在对方明确说「你理解错了 / 我说的是… / 你说错了」时，撤回自己刚发的那一条再重新回答。默认关。"
+      }
+    }
+  },
   "mindstream": {
     "description": "思绪（内心持久化）",
     "type": "object",

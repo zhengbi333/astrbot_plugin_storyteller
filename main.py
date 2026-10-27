@@ -12,6 +12,7 @@ import json
 from . import acting as acting_mod
 from . import context_budget as budget_mod
 from . import emotion_events as emotion_mod
+from . import recall as recall_mod
 import importlib
 import re
 import time
@@ -661,6 +662,17 @@ class StorytellerPlugin(Star):
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest):
         # 0.250：先看这句是不是"情绪事件"（被骂/被夸/被表白…）→ 立刻改状态，
         # 而不是等十几分钟慢慢漂。关键词同步判，零延迟；LLM 兜底见 _apply_emotion_event_llm。
+        # 0.251：对方要是说「你理解错了 / 我说的是…」，先把刚发那条撤掉再重答。
+        try:
+            if self.config.bool("recall.enabled", False):
+                _session = str(getattr(event, "unified_msg_origin", "") or "")
+                _text = str(getattr(req, "prompt", "") or "")
+                _pending = recall_mod.plan(_session, _text, self.recall_book)
+                if _pending is not None:
+                    self.recall_book.take(_session)
+                    asyncio.create_task(self._do_recall(event, _pending.message_id))
+        except Exception as _rc_exc:
+            logger.debug("[Storyteller] 撤回判定失败（忽略）: %s", _rc_exc)
         try:
             _raw = str(getattr(req, "prompt", "") or "")
             if self.config.bool("emotion.enabled", True) and _raw:
@@ -2708,6 +2720,13 @@ class StorytellerPlugin(Star):
                             if result is False:
                                 raise RuntimeError("发送接口返回失败")
                             sent_ok = True
+                            # 0.251：记下 message_id，供「对方说我理解错了」时撤回
+                            try:
+                                _mid = recall_mod.message_id_of(result)
+                                if _mid:
+                                    self.recall_book.remember(session_id, _mid, content)
+                            except Exception:
+                                pass
                             # 0.211：记下这句（下一轮检查口头禅用）
                             self._note_my_reply(session_id, content)
                             # 接管绕过主链：把 Bot 回复回填记忆插件时间线，
@@ -3517,6 +3536,20 @@ class StorytellerPlugin(Star):
         except Exception as exc:
             logger.warning("[Storyteller] 外部事件记忆写入失败: %s", exc)
             return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+    async def _do_recall(self, event: Any, message_id: str) -> bool:
+        """真去调 OneBot 撤回；失败只记日志。"""
+        try:
+            bot = getattr(event, "bot", None)
+            if bot is None:
+                logger.debug("[Storyteller] 撤回跳过：拿不到 bot")
+                return False
+            await recall_mod.recall(bot, message_id)
+            logger.info("[Storyteller] 已撤回 %s", message_id)
+            return True
+        except Exception as exc:
+            logger.debug("[Storyteller] 撤回失败（忽略）: %s", exc)
+            return False
 
     def _emotion_budget(self) -> Any:
         if getattr(self, "_emotion_budget_obj", None) is None:
@@ -4659,6 +4692,13 @@ class StorytellerPlugin(Star):
             return ""
 
     # ------------------------------------------------------------ 生命周期
+
+    @property
+    def recall_book(self) -> Any:
+        """最近发出的消息（用于撤回），按会话各留一条。"""
+        if getattr(self, "_recall_book_obj", None) is None:
+            self._recall_book_obj = recall_mod.RecallBook()
+        return self._recall_book_obj
 
     async def initialize(self):
         self.proactive.start()
