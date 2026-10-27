@@ -11,6 +11,14 @@
 
 
 
+
+## alpha-0.276（当前）
+
+- **P1-6 第一步：缓存可观测**。查证 AstrBot 侧（我们的直连通道）**能拿到** `prompt_cache_hit_tokens`，且 `models.py` 早就解析成 `usage.input_cached`；但 `TokenStore.record()` 没有这个字段，缓存数一路被丢。现在：①`_diag.log` 每次记录 cached/other/命中率/System 长度；②记账加 `cached_tokens`（不重复计入 input）。
+- **没有改 system 结构**：先拿实测命中率再决定要不要调整 prompt 顺序（避免无数据支撑的重构）。
+- `audit_92_cache_observability.py` **14/14**。
+- 详见 [changelogs/alpha-0.276.md](changelogs/alpha-0.276.md)。
+
 ## alpha-0.275（当前）
 
 - **P1-7 短回复多带一轮**：对方只回「嗯嗯」这类短话时，上下文多取一轮，让她知道你在应什么。阈值 `intercept.short_reply_chars`（默认 6，0 = 关）。

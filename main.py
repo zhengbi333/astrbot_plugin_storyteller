@@ -3506,9 +3506,25 @@ class StorytellerPlugin(Star):
                     _disable_thinking=True,
                 )
             usage = getattr(resp, "usage", None)
-            input_other += int(getattr(usage, "input_other", 0) or getattr(resp, "est_input_tokens", 0) or 0)
-            input_cached += int(getattr(usage, "input_cached", 0) or 0)
+            _step_other = int(getattr(usage, "input_other", 0) or getattr(resp, "est_input_tokens", 0) or 0)
+            _step_cached = int(getattr(usage, "input_cached", 0) or 0)
+            input_other += _step_other
+            input_cached += _step_cached
             output += int(getattr(usage, "output", 0) or 0)
+            # P1-6 观测：前缀缓存命中情况。
+            # 命中率高 = 稳定段被 provider 缓存；几乎为 0 = 每轮都在重算（该考虑调整 system 结构）。
+            try:
+                _diag(
+                    "缓存观测: cached=%d other=%d 命中率=%.0f%% system_chars=%d"
+                    % (
+                        _step_cached,
+                        _step_other,
+                        (100.0 * _step_cached / max(1, _step_cached + _step_other)),
+                        len(str(final_system or "")),
+                    )
+                )
+            except Exception:
+                pass
             calls = list(getattr(resp, "tool_calls", None) or [])
             state = self._inflight_state(str(getattr(event, "unified_msg_origin", "") or ""))
             if state and state.get("pending"):
@@ -5828,7 +5844,8 @@ class StorytellerPlugin(Star):
                 out = estimate_tokens(out_text)
             if inp == 0 and out == 0:
                 return
-            self.token_store.record(source="astr_total", task="main_chain", model=model, input_tokens=inp, output_tokens=out)
+            self.token_store.record(source="astr_total", task="main_chain", model=model, input_tokens=inp,
+                    cached_tokens=int(getattr(usage, "input_cached", 0) or 0), output_tokens=out)
         except Exception:
             pass
 
@@ -5863,6 +5880,7 @@ class StorytellerPlugin(Star):
             out = out_real if (out_real or 0) > 0 else estimate_tokens(out_text)
             if inp == 0 and out == 0:
                 return
-            self.token_store.record(source="main", task="main_chain", model=model, input_tokens=inp, output_tokens=out)
+            self.token_store.record(source="main", task="main_chain", model=model, input_tokens=inp,
+                    cached_tokens=int(getattr(usage, "input_cached", 0) or 0), output_tokens=out)
         except Exception:
             pass

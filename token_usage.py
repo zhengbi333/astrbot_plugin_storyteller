@@ -113,8 +113,13 @@ class TokenStore:
         model: str,
         input_tokens: int,
         output_tokens: int,
+        cached_tokens: int = 0,
     ) -> None:
-        """记一笔（按来源 + 任务 + 模型累积）。"""
+        """记一笔（按来源 + 任务 + 模型累积）。
+
+        cached_tokens：其中有多少是**前缀缓存命中**的输入 token。
+        它已包含在 input_tokens 里（不额外相加），单独记一份用于观察缓存效果。
+        """
         inp = max(0, int(input_tokens or 0))
         out = max(0, int(output_tokens or 0))
         if inp == 0 and out == 0:
@@ -134,7 +139,11 @@ class TokenStore:
                     "output": int(old_total.get("output", 0) or 0),
                     "calls": 0,
                 }
+        cached = max(0, int(cached_tokens or 0))
         total = day_data.setdefault("total", {})
+        if cached:
+            total["cached"] = int(total.get("cached", 0) or 0) + cached
+
         total["input"] = int(total.get("input", 0) or 0) + inp
         total["output"] = int(total.get("output", 0) or 0) + out
         total["calls"] = int(total.get("calls", 0) or 0) + 1
