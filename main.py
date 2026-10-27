@@ -1785,7 +1785,20 @@ class StorytellerPlugin(Star):
             return "私聊"
         return "私聊" if not uid else "对话"
 
-    def _recent_timeline_text(self, uid: str, limit: int = 4, *, persona_id: str = "") -> str:
+    def _is_short_reply(self, text: Any) -> bool:
+        """对方这条是不是极短回复（「嗯嗯」「哦」「好」）。阈值可配，0 = 关闭。"""
+        try:
+            limit = max(0, min(50, int(self.config.int("intercept.short_reply_chars", 6) or 0)))
+        except Exception:
+            limit = 6
+        if limit <= 0:
+            return False
+        body = str(text or "").strip()
+        return 0 < len(body) <= limit
+
+    def _recent_timeline_text(
+        self, uid: str, limit: int = 4, *, persona_id: str = "", short_reply: bool = False
+    ) -> str:
         """取该会话最近对话（【为你篆刻的历史】时间线）作为「{上下文}」注入内容。
 
         0.172：渲染时**按时间正序（旧→新）**，并给每行标注说话人（对方/我/系统/昵称）——
@@ -1809,6 +1822,10 @@ class StorytellerPlugin(Star):
             # 现在同样的 4 表示"最近 4 轮"。因为 bot 是拆条发送的（一轮可能有好几条），
             # 这里先按"轮数 × 6"多取一些条数，渲染前再按轮精确截断。
             rounds = max(0, min(12, int(limit)))
+            # P1-7：对方只回「嗯嗯」这类极短话时，多带一轮上下文，
+            # 让她知道你在回应什么（阈值可配，0 = 关闭）
+            if short_reply and rounds < 12:
+                rounds = min(12, rounds + 1)
             # 多取**一轮**作缓冲：否则取到的条数可能正好跨在轮边界上（如只取到"上一轮的尾巴 + 这一轮"），
             # 按轮截断时就切不出完整的一轮。
             fetch = min(80, max(6, (rounds + 1) * 6))
@@ -1839,6 +1856,16 @@ class StorytellerPlugin(Star):
                 else:
                     label = "系统"
                 rows.append((ts, label, text[:100]))
+            # P1-8：给每行加 [n] 编号（只在本轮有效，用于指代，不是消息 ID）
+            try:
+                numbered = bool(self.config.bool("intercept.timeline_numbering", True))
+            except Exception:
+                numbered = True
+            if numbered:
+                rows = [
+                    (ts, label, f"[{i + 1}] {text}")
+                    for i, (ts, label, text) in enumerate(rows)
+                ]
             # 正序：时间线源一般最新在前——若首行时间晚于末行则反转
             if len(rows) >= 2:
                 try:
@@ -2285,6 +2312,8 @@ class StorytellerPlugin(Star):
             anchors["context"] = self._recent_timeline_text(
                 session_id, limit=max(0, min(12, self.config.int("intercept.context_count", 4))),
                 persona_id=str(getattr(event, "_storyteller_memory_persona", "") or ""),
+                # P1-7：极短回复时多带一轮，让她知道你是在应什么
+                short_reply=self._is_short_reply(prompt or user_text),
             )
             # 0.163：时间线可能已含本轮消息（防抖收集时就写入了记忆插件时间线）——剔除，
             # 否则"你好？"在 {当前说话}/{上下文}/【本次对话】里重复多次，模型以为对方在重复发问
@@ -2426,6 +2455,8 @@ class StorytellerPlugin(Star):
             anchors["context"] = self._recent_timeline_text(
                 session_id, limit=max(0, min(12, self.config.int("intercept.context_count", 4))),
                 persona_id=str(getattr(event, "_storyteller_memory_persona", "") or ""),
+                # P1-7：极短回复时多带一轮，让她知道你是在应什么
+                short_reply=self._is_short_reply(prompt or user_text),
             )
             # 0.163：时间线可能已含本轮消息（防抖收集时就写入了记忆插件时间线）——剔除，
             # 否则"你好？"在 {当前说话}/{上下文}/【本次对话】里重复多次，模型以为对方在重复发问
