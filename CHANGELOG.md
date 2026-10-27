@@ -4,7 +4,13 @@
 
 
 
-## alpha-0.265（当前）
+## alpha-0.266（当前）
+
+- **修白屏**：0.265 用正则批量加 `await` 时误改了 `.then` 回调里的一行，导致 `app.js` 语法错误、整页不执行。已改回。
+- **新增 `audit_85_js_syntax.py`（12/12）**：三个面板 `app.js` 全部过 `node --check`，并专门查「非 async 箭头函数里裸 await」；发版脚本现在**语法不过就中止**。
+- 详见 [changelogs/alpha-0.266.md](changelogs/alpha-0.266.md)。
+
+## alpha-0.265
 
 - **修「切了标签但内容还是旧页」**：`render()` 里 29 个页面渲染是并行不等待的，旧页请求晚回来会覆盖新页内容。现在改为：切页立即清空（显示「切换中…」）+ 29 处 `await` 串行 + 末尾渲染序号校验（过期则重渲染当前页）。
 - 详见 [changelogs/alpha-0.265.md](changelogs/alpha-0.265.md)。

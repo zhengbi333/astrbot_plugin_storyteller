@@ -2,7 +2,7 @@
 
 `astrbot_plugin_storyteller`（中文名：**为你续写的故事**）是面向 AstrBot 的**拟人陪伴插件**：让 Bot 有自己的状态、情绪、日程、穿搭、衣柜、梦境与日记，记得和每个人的关系，用拟人的方式说话、沉默、发表情包，甚至主动找你聊天。
 
-- 版本：`alpha-0.265`
+- 版本：`alpha-0.266`
 - AstrBot 版本：`>= 4.22.0`
 - 更新日志：见 [changelogs/](changelogs/)（每个版本一个 Markdown 文件）
 

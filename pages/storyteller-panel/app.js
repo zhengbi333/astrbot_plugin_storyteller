@@ -3113,7 +3113,7 @@ async function renderMemory() {
       testBtn.disabled = true;
       testBtn.textContent = "检测中…";
       apiGet("memory").then((d) => {
-        if (state.current === "memory") await renderMemory();
+        if (state.current === "memory") renderMemory();
       }).catch(() => {
         testBtn.disabled = false;
         testBtn.textContent = "检测失败，重试";
