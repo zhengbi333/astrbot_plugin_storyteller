@@ -462,9 +462,14 @@ class DebounceManager:
             # 0.252 图文合并：纯媒体消息（只有图/表情、没有文字）如果是「跟着上一条来的」，
             # 就当作那条的补充静默吞掉 —— 否则它会单独开窗口、单独触发一次回复，
             # 看起来就是「她只回了那张图」，和上文割裂。
-            if self._swallow_media_followup(event, uid, text, images, retained):
-                self._silence(event)
-                return True
+            # 0.255 回滚：下面这个"吞掉纯媒体"的方案在真机上把整个防抖链路弄挂了
+            # （18:13、18:15 两次实测：文字 + 图之后，她一条都不回）。
+            # 原因是提前 return 会破坏等待中会话的结算流程。
+            # 图文的合并改回"靠防抖窗口自然合并"——把 debounce.window 调到 3~4 秒即可，
+            # 这比在链路里做特殊分支安全得多。判定函数保留（面板/测试还能用），
+            # 但不再参与消息流。
+            # if self._swallow_media_followup(event, uid, text, images, retained):
+            #     return True
             # 有文字的消息：记下时间，供后续纯媒体判断"是不是跟上一条一起的"
             if str(text or "").strip():
                 self._last_media_anchor[uid] = time.time()

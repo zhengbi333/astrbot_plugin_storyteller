@@ -2,7 +2,13 @@
 
 完整按版本日志见 [changelogs/](changelogs/) 目录。
 
-## alpha-0.254（当前）
+## alpha-0.255（当前）
+
+- **回滚图文合并的吞图方案**：真机实测两次（18:13、18:15）文字+图之后她**一条都不回**。根因是 `handle()` 返回 `True` 表示「已接管静默」，而那条消息属于正在等待结算的会话，提前 return 破坏了结算流程。
+- **结论：图文割裂不是插件 bug** —— 媒体一直进防抖窗口，真正原因是 `debounce.window=2.0` 太短。建议调到 3.5~4.0、`max_wait` 调 8。
+- 详见 [changelogs/alpha-0.255.md](changelogs/alpha-0.255.md)。
+
+## alpha-0.254
 
 - **修情绪事件真根因**：`self.presence` 属性根本不存在（真名 `presence_store`），整个事件方法一直在 AttributeError 里被吞掉 —— 所以 tone 会动、事件永远不生效。修完实测「你个笨蛋」→ tone 0.113 → -0.191。失败日志提到 warning。
 - **接入点修正**：`on_llm_request`（接管链路不走）→ `on_message_observe` 的最前面（此前放在 `_observe_message` 之后，前者抛错就全不执行）。
