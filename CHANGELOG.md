@@ -2,7 +2,12 @@
 
 完整按版本日志见 [changelogs/](changelogs/) 目录。
 
-## alpha-0.245（当前）
+## alpha-0.246（当前）
+
+- **新增「扮演守则」**：独立一层【怎么演】，管句子长度、去书面语、不解释自己、引用判断、被问是不是 AI 怎么答、怎么收尾、不用 Markdown；`acting.enabled` 可一键关，六个分节可单独开关，字数上限 900（夹 200~2000）。**不覆盖你的模板，也不涉及人设**。
+- 新用例 `audit_67` **22/22**。详见 [changelogs/alpha-0.246.md](changelogs/alpha-0.246.md)。
+
+## alpha-0.245
 
 - 新增 `note_external_event`：供认知插件转写「我做了什么」到 deepmemory（统一写入口，去重、异常不抛、无桥降级）。与认知 0.7.0 的 `notify_persona` 配套，补上「认知 → 人格 → 记忆」的联动断边。
 - 新用例 `audit_65` **20/20**。详见 [changelogs/alpha-0.245.md](changelogs/alpha-0.245.md)。

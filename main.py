@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+
+from . import acting as acting_mod
 import importlib
 import re
 import time
@@ -2341,6 +2343,13 @@ class StorytellerPlugin(Star):
                 final_system = _re.sub(r"\n{3,}", "\n\n", str(final_system or ""))
             except Exception:
                 pass
+            # 0.246：扮演守则——管"怎么演"，与人模板解耦（模板管"我是谁"，守则管"怎么演"）
+            try:
+                _acting = acting_mod.build_guidance(self)
+                if _acting:
+                    final_system += "\n\n" + _acting
+            except Exception as exc:
+                logger.debug("[Storyteller] 注入扮演守则失败（忽略）: %s", exc)
             # 0.243：任务执行守则——只在"能用外部工具"时注入，否则她没有动手能力，说了也没用
             try:
                 if self._astrbot_tools_enabled() and self.config.bool(

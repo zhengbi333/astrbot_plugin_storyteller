@@ -1392,6 +1392,60 @@
       }
     }
   },
+  "acting": {
+    "description": "扮演守则（怎么演）",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "注入扮演守则",
+        "type": "bool",
+        "default": true,
+        "hint": "在 system 末尾追加一段「怎么演」的技术规范：句子长度、节奏、不解释自己、引用怎么看、被问是不是 AI 怎么答、怎么收尾、不用 Markdown。它只讲演出技巧，不涉及人设（人设仍由人格卡与模板决定），也不会覆盖你的模板。"
+      },
+      "max_chars": {
+        "description": "守则字数上限",
+        "type": "int",
+        "default": 900,
+        "hint": "这段守则每次请求都会带上，太长费 token。默认 900 字，夹在 200~2000。"
+      },
+      "sec_length": {
+        "description": "包含「句子长度」",
+        "type": "bool",
+        "default": true,
+        "hint": "短句优先、一条一事。"
+      },
+      "sec_tone": {
+        "description": "包含「语气去书面化」",
+        "type": "bool",
+        "default": true,
+        "hint": "不用连接词、不复述、不升华、不解释自己。"
+      },
+      "sec_identity": {
+        "description": "包含「身份应对」",
+        "type": "bool",
+        "default": true,
+        "hint": "被问是不是 AI 时怎么答。"
+      },
+      "sec_reference": {
+        "description": "包含「引用与 @」",
+        "type": "bool",
+        "default": true,
+        "hint": "引用指向判断、被 @ 必回、不抢话。"
+      },
+      "sec_closing": {
+        "description": "包含「收尾」",
+        "type": "bool",
+        "default": true,
+        "hint": "不想接怎么退场。"
+      },
+      "sec_format": {
+        "description": "包含「格式与表情」",
+        "type": "bool",
+        "default": true,
+        "hint": "不用 Markdown、不用括号写动作。"
+      }
+    }
+  },
   "mindstream": {
     "description": "思绪（内心持久化）",
     "type": "object",
