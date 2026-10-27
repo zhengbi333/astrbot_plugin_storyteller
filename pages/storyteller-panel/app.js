@@ -4352,7 +4352,10 @@ async function renderActing() {
   const data = await apiGet("acting/sections");
   const rows = (data && data.sections) || [];
   if (!rows.length) {
-    return '<div class="empty">读不到守则（acting 目录可能不存在）</div>';
+    const empty = '<div class="empty">读不到守则（acting 目录可能不存在）</div>';
+    const v = $("#view");
+    if (v) v.innerHTML = empty;
+    return empty;
   }
   let html = '<div class="grid">' +
     `<div class="cell"><div class="k">守则节数</div><div class="v big">${rows.length}</div></div>` +
@@ -4376,6 +4379,8 @@ async function renderActing() {
     </div>`;
   });
   html += "</div>";
+  const view = $("#view");
+  if (view) view.innerHTML = html;
   return html;
 }
 
@@ -4416,7 +4421,10 @@ async function renderJudge() {
   const data = await apiGet("judge/stats");
   const rows = (data && data.judges) || [];
   if (!rows.length) {
-    return '<div class="empty">没有判定器数据（judge.py 可能未加载）</div>';
+    const empty = '<div class="empty">没有判定器数据（judge.py 可能未加载）</div>';
+    const v = $("#view");
+    if (v) v.innerHTML = empty;
+    return empty;
   }
   const rate = data.fallback_rate == null ? 0 : Math.round(data.fallback_rate * 100);
   let html = `<div class="grid">
@@ -4446,6 +4454,8 @@ async function renderJudge() {
     <div class="main"><div class="t">判定一律 LLM 优先，规则只当兜底</div>
     <div class="d">「兜底」次数多 = 模型不可用或超时，那时会退回规则；「缓存」是不重复花钱的命中。</div></div>
     </div></div>`;
+  const view = $("#view");
+  if (view) view.innerHTML = html;
   return html;
 }
 
