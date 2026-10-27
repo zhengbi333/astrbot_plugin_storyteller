@@ -188,6 +188,19 @@ _EXT_TOOL_PREFIX = "ext:"
 _EXT_TOOL_CACHE_TTL = 20.0
 
 
+def _bigrams(text: str) -> set[str]:
+    """文字的字符二元组（中文没空格，二元组足够区分主题）。"""
+    cleaned = "".join(ch for ch in str(text or "") if ch.strip())
+    return {cleaned[i:i + 2] for i in range(len(cleaned) - 1)}
+
+
+def _similarity(left: set[str], right: set[str]) -> float:
+    """两个二元组集合的重合度（相对较小的一侧），用于判重。"""
+    if not left or not right:
+        return 0.0
+    return len(left & right) / max(1, min(len(left), len(right)))
+
+
 def _compact_tool_messages(messages: list[dict], keep_recent: int = 6, summary_chars: int = 120) -> int:
     """1.2：把**较早**的工具结果压成一行摘要，保留最近 keep_recent 条完整。
 
@@ -2358,25 +2371,13 @@ class StorytellerPlugin(Star):
                 pass
             # 0.246：扮演守则——管"怎么演"，与人模板解耦（模板管"我是谁"，守则管"怎么演"）
             try:
-                _acting = acting_mod.build_guidance(self)
+                _acting = acting_mod.build_guidance(
+                    self, with_tooling=self._astrbot_tools_enabled()
+                )
                 if _acting:
                     final_system += "\n\n" + _acting
             except Exception as exc:
                 logger.debug("[Storyteller] 注入扮演守则失败（忽略）: %s", exc)
-            # 0.243：任务执行守则——只在"能用外部工具"时注入，否则她没有动手能力，说了也没用
-            try:
-                if self._astrbot_tools_enabled() and self.config.bool(
-                    "capabilities.work_rules_enabled", True
-                ):
-                    final_system += (
-                        "\n\n【工具与任务】"
-                        "\n- 要做的事涉及文件/网页/文档/数据时，先想清步骤，一步一步来：做一步、看结果，再决定下一步。"
-                        "\n- 工具返回失败时，读错误原文再改一版重试；不要用同样的参数反复调同一个工具。"
-                        "\n- 产出文件（文档/表格/幻灯片）之后，用 toolbox_send_file 发给对方，别只说「已经做好了」。"
-                        "\n- 中间过程不要发给群里，只在最后说结论。"
-                    )
-            except Exception as exc:
-                logger.debug("[Storyteller] 注入任务守则失败（忽略）: %s", exc)
             # 0.168 连发接住：对方一句话内连续输入多条（如"hmmm/这么冷淡/你在干嘛"合并），
             # 模型易只挑情绪重的一句、漏掉问句——补一句"都接住，先回最后的问句"
             try:
@@ -3474,6 +3475,8 @@ class StorytellerPlugin(Star):
             del recent[:-80]
 
             ctx = self._session_ctx_dict(event) if event is not None else {}
+            if await self._memory_is_duplicate(bridge, text, ctx):
+                return {"ok": False, "reason": "duplicate_memory", "settled": 0}
             memory_id = await bridge.record_bot_action(
                 content=str(text or "")[:1200],
                 session_context=ctx,
@@ -3499,6 +3502,32 @@ class StorytellerPlugin(Star):
             logger.warning("[Storyteller] 外部事件记忆写入失败: %s", exc)
             return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
+    async def _memory_is_duplicate(
+        self, bridge: Any, content: str, session_context: Any, *, threshold: float = 0.6,
+    ) -> bool:
+        """查最近记忆里有没有内容高度相近的条目（**含认知写的**），避免同一件事写两条。"""
+        grams = _bigrams(content)
+        if len(grams) < 4:
+            return False
+        try:
+            lister = getattr(bridge, "list_recent_memories", None)
+            if not callable(lister):
+                return False
+            records = lister(session_context=session_context, limit=12) or []
+        except Exception:
+            return False
+        for record in records:
+            if isinstance(record, dict):
+                text = str(record.get("content") or record.get("summary") or "")
+            else:
+                text = str(getattr(record, "content", "") or getattr(record, "summary", ""))
+            if not text:
+                continue
+            if _similarity(grams, _bigrams(text)) >= threshold:
+                logger.info("[Storyteller] 记忆去重：已有相近条目，跳过写入")
+                return True
+        return False
+
     def _settle_promises_for_action(self, action_text: str) -> int:
         """把"我刚做完的事"与挂着未结算的约定对齐，命中就标记结算。
 
@@ -3510,11 +3539,7 @@ class StorytellerPlugin(Star):
         if len(text) < 6:
             return 0
 
-        def bigrams(source: str) -> set[str]:
-            cleaned = "".join(ch for ch in source if ch.strip())
-            return {cleaned[i:i + 2] for i in range(len(cleaned) - 1)}
-
-        action_grams = bigrams(text)
+        action_grams = _bigrams(text)
         if not action_grams:
             return 0
         engine = getattr(self, "_inspiration_engine", None)
@@ -3535,7 +3560,7 @@ class StorytellerPlugin(Star):
                     continue
             except Exception:
                 continue
-            shared = action_grams & bigrams(promise_text)
+            shared = action_grams & _bigrams(promise_text)
             if len(shared) < 2:
                 continue
             try:
@@ -4211,6 +4236,8 @@ class StorytellerPlugin(Star):
             self._record_usage(resp, "profile", provider_id or "default")
             profiles = parse_profile_items(str(getattr(resp, "completion_text", "") or ""))
             for content in profiles:
+                if await self._memory_is_duplicate(bridge, content, ctx):
+                    continue
                 memory_id = await bridge.add_memory(
                     content=content,
                     memory_type="preference",

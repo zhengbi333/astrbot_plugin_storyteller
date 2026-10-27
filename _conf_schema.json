@@ -1405,8 +1405,8 @@
       "max_chars": {
         "description": "守则字数上限",
         "type": "int",
-        "default": 900,
-        "hint": "这段守则每次请求都会带上，太长费 token。默认 900 字，夹在 200~2000。"
+        "default": 800,
+        "hint": "这段守则每轮都随 system 发送，默认 800 字（夹 200~2000）。工具使用守则已并进来，不再单独注入，所以总字数比原来（900+160）少。"
       },
       "sec_length": {
         "description": "包含「句子长度」",
@@ -1443,6 +1443,12 @@
         "type": "bool",
         "default": true,
         "hint": "不用 Markdown、不用括号写动作。"
+      },
+      "sec_tooling": {
+        "description": "包含「工具使用守则」",
+        "type": "bool",
+        "default": true,
+        "hint": "只在能用外部工具时生效（不能动手时不会注入）。"
       }
     }
   },
