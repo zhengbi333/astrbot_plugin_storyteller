@@ -12,6 +12,36 @@
 
 from __future__ import annotations
 
+# 0.253：这些词出现在 mood 里，会直接让她对谁都没兴致（真机「笑不出来」就是产物之一）。
+# mood 是 LLM 生成的，拦不住措辞，所以在读取处做一次兜底替换。
+_COLD_MOOD_WORDS = (
+    "收着", "收着点", "收起", "走神", "心不在", "飘到", "飘向", "心不在焉",
+    "敷衍", "懒得", "没兴致", "不想说", "不想聊", "敷衍",
+)
+
+
+def sanitize_mood(text: str) -> str:
+    """把 mood 里会让人变冷的说法换掉（mood 是 LLM 生成的，拦不住措辞，只能读时兜底）。"""
+    import re as _re
+
+    body = str(text or "")
+    if not body:
+        return body
+    changed = False
+    # 逐个冷淡词清除它所在的从句（支持句首，且循环清所有）
+    for word in _COLD_MOOD_WORDS:
+        if word not in body:
+            continue
+        pattern = r"(?:^|[；;，,])\s*[^；;，,。]*" + _re.escape(word) + r"[^；;，,。]*"
+        new_body = _re.sub(pattern, "", body).strip(" ；;，,。")
+        if new_body != body:
+            body = new_body
+            changed = True
+    if changed:
+        body = body.strip(" ；;，,。")
+        return body or "此刻心里没什么特别的，正常状态"
+    return body
+
 
 import json
 import time
@@ -250,6 +280,12 @@ def compose_stance(presence: dict[str, Any], schedule: dict[str, Any] | None = N
 
 
 def build_presence_anchor(presence: dict[str, Any]) -> str:
+    # 0.253：mood 若是 LLM 生成的，可能带"收着劲"这类让人变冷的说法
+    try:
+        if isinstance(presence, dict) and presence.get("mood"):
+            presence["mood"] = sanitize_mood(str(presence["mood"]))
+    except Exception:
+        pass
     """把当前状态渲染成注入文本：语气走廊 + 一句心情（不给数值）。"""
     if not isinstance(presence, dict):
         return ""
@@ -384,6 +420,11 @@ class PresenceStore:
     def save(self, presence: dict[str, Any]) -> dict[str, Any]:
         loaded = self.load(with_decay=False)
         normalized = default_presence()
+        # 0.254：last_event / last_event_at 是情绪事件留下的痕迹，不在 default_presence 里，
+        # 原来会被白名单丢掉（tone 生效了、事件名却看不到）。这里显式保留。
+        for _extra in ("last_event", "last_event_at"):
+            if isinstance(presence, dict) and _extra in presence:
+                normalized[_extra] = presence[_extra]
         if isinstance(presence, dict):
             normalized["tone"] = clamp(_as_float(presence.get("tone", 0.0) or 0.0, 0.0), -1.0, 1.0)
             normalized["tempo"] = clamp(_as_float(presence.get("tempo", 0.0) or 0.0, 0.0), -1.0, 1.0)

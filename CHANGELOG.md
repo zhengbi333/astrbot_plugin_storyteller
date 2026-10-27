@@ -2,7 +2,14 @@
 
 完整按版本日志见 [changelogs/](changelogs/) 目录。
 
-## alpha-0.253（当前）
+## alpha-0.254（当前）
+
+- **修情绪事件真根因**：`self.presence` 属性根本不存在（真名 `presence_store`），整个事件方法一直在 AttributeError 里被吞掉 —— 所以 tone 会动、事件永远不生效。修完实测「你个笨蛋」→ tone 0.113 → -0.191。失败日志提到 warning。
+- **接入点修正**：`on_llm_request`（接管链路不走）→ `on_message_observe` 的最前面（此前放在 `_observe_message` 之后，前者抛错就全不执行）。
+- **mood 兜底**：`sanitize_mood()` 把「收着劲/走神/飘到…」这类让人冷淡的从句去掉。
+- 详见 [changelogs/alpha-0.254.md](changelogs/alpha-0.254.md)。
+
+## alpha-0.253
 
 - **真机三修**：①情绪事件从 `on_llm_request` 改挂 `on_message_observe`（接管链路不走前者，真机实测 `last_event` 一直是 None）；②`mood` 删掉「先收着点」这类让她敷衍的描述；③补三张示例人格卡（不默认启用）—— 此前 `roles/` 目录不存在，她用的是默认 assistant 人格。
 - 新用例 `audit_81` **13/13**。详见 [changelogs/alpha-0.253.md](changelogs/alpha-0.253.md)。

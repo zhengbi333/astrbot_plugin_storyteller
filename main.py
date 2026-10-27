@@ -432,17 +432,9 @@ class StorytellerPlugin(Star):
             if self._is_self_message(event):
                 return  # 平台回显的自身消息：不当作对方的消息观察/记录
             self._last_talk_ts = time.time()
-            self.proactive.note_interaction(event)
-            # 发送缓冲：缓存未发完时用户抢话 → 抢话裁决（A 提速发完 / B 丢弃带上下文重组织）
-            buffer = getattr(self, "reply_buffer", None)
-            if buffer is not None:
-                try:
-                    buffer.on_user_message(event)
-                except Exception:
-                    pass
-            self._touch_relationship(event)
-            self._observe_message(event)
-            # 0.253：情绪事件挂在这里 —— on_message_observe 是**所有**消息都会过的入口，
+            # 0.253：情绪事件必须在最前面 —— 后面 _observe_message 一旦抛错被吞，
+            # 放在它之后的代码就不会执行（真机就是 last_event 一直 None 的另一半原因）。
+            # on_message_observe 是**所有**消息都会过的入口，
             # 而接管链路（直连生成）不走 AstrBot 的 on_llm_request，挂那儿等于没挂。
             # 真机验证就是这样发现 last_event 一直是 None 的。
             try:
@@ -464,6 +456,17 @@ class StorytellerPlugin(Star):
                             asyncio.create_task(self._apply_emotion_event_llm(event, _text))
             except Exception as _emo_exc:
                 logger.debug("[Storyteller] 情绪事件（观察层）失败（忽略）: %s", _emo_exc)
+            self.proactive.note_interaction(event)
+            # 发送缓冲：缓存未发完时用户抢话 → 抢话裁决（A 提速发完 / B 丢弃带上下文重组织）
+            buffer = getattr(self, "reply_buffer", None)
+            if buffer is not None:
+                try:
+                    buffer.on_user_message(event)
+                except Exception:
+                    pass
+            self._touch_relationship(event)
+            self._observe_message(event)
+
         except Exception as exc:
             logger.warning("[Storyteller] 消息观察异常: %s", exc)
 
@@ -3586,13 +3589,13 @@ class StorytellerPlugin(Star):
             verdict = emotion_mod.judge_keywords_only(text)
             if not verdict.is_event:
                 return ""
-            presence = self.presence.load()
+            presence = self.presence_store.load()
             emotion_mod.apply_to_presence(presence, verdict)
-            self.presence.save(presence)
-            logger.info("[Storyteller] 情绪事件：%s（%s）", verdict.describe(), user or "-")
+            self.presence_store.save(presence)
+            logger.warning("[Storyteller] 情绪事件：%s（%s）", verdict.describe(), user or "-")
             return verdict.event
         except Exception as exc:
-            logger.debug("[Storyteller] 情绪事件失败（忽略）: %s", exc)
+            logger.warning("[Storyteller] 情绪事件失败: %s", exc)
             return ""
 
     async def _apply_emotion_event_llm(self, event: Any, text: str) -> str:
@@ -3616,9 +3619,9 @@ class StorytellerPlugin(Star):
             )
             if not verdict.is_event:
                 return ""
-            presence = self.presence.load()
+            presence = self.presence_store.load()
             emotion_mod.apply_to_presence(presence, verdict)
-            self.presence.save(presence)
+            self.presence_store.save(presence)
             logger.info("[Storyteller] 情绪事件（LLM）：%s", verdict.describe())
             return verdict.event
         except Exception as exc:
