@@ -3419,6 +3419,52 @@ class StorytellerPlugin(Star):
                 continue
         return None
 
+    async def note_external_event(
+        self,
+        *,
+        kind: str,
+        text: str,
+        event: Any = None,
+        meta: dict | None = None,
+    ) -> dict:
+        """供其它插件（认知）调用的「记忆转写」入口。
+
+        认知做完一件事 → 调这里 → 由人格统一写入 deepmemory（`record_bot_action`，
+        类型 `self_action`）。这样记忆只有一个写入口：措辞、去重、会话归属都在这里决定，
+        认知不需要知道记忆库长什么样。
+
+        返回 {ok, reason, memory_id}；任何异常都吞掉并返回原因，**绝不抛给调用方**
+        （调用方是工具执行路径，不能被记忆问题拖垮）。
+        """
+        try:
+            bridge = self._get_memory_bridge()
+            if bridge is None or not hasattr(bridge, "record_bot_action"):
+                return {"ok": False, "reason": "no_bridge"}
+
+            key = f"{kind}|{str(text or '')[:80]}"
+            recent = getattr(self, "_external_note_keys", None)
+            if recent is None:
+                recent = []
+                self._external_note_keys = recent
+            if key in recent:
+                return {"ok": False, "reason": "duplicate"}
+            recent.append(key)
+            del recent[:-80]
+
+            ctx = self._session_ctx_dict(event) if event is not None else {}
+            memory_id = await bridge.record_bot_action(
+                content=str(text or "")[:1200],
+                session_context=ctx,
+                source_plugin="astrbot_plugin_cognition",
+                metadata={"kind": str(kind or "action"), **(meta or {})},
+            )
+            if memory_id:
+                logger.info("[Storyteller] 外部行动已写入记忆：%s", str(text)[:60])
+            return {"ok": bool(memory_id), "memory_id": memory_id, "reason": "" if memory_id else "empty_id"}
+        except Exception as exc:
+            logger.warning("[Storyteller] 外部事件记忆写入失败: %s", exc)
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
     def _get_memory_bridge(self) -> Any:
         try:
             module = self._import_deepmemory_bridge_module()

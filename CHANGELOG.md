@@ -2,7 +2,12 @@
 
 完整按版本日志见 [changelogs/](changelogs/) 目录。
 
-## alpha-0.244（当前）
+## alpha-0.245（当前）
+
+- 新增 `note_external_event`：供认知插件转写「我做了什么」到 deepmemory（统一写入口，去重、异常不抛、无桥降级）。与认知 0.7.0 的 `notify_persona` 配套，补上「认知 → 人格 → 记忆」的联动断边。
+- 新用例 `audit_65` **20/20**。详见 [changelogs/alpha-0.245.md](changelogs/alpha-0.245.md)。
+
+## alpha-0.244
 
 - **打转计数跨轮累计**（按会话保存在实例上），不再因 `cap_round` 重启被清零。
 - **历史工具结果自动压缩**：保留最近 6 条完整，更早的压成一行摘要，避免 8 轮后撑爆上下文。
