@@ -218,7 +218,7 @@ function showApiBanner(message) {
 
 async function apiGet(endpoint, params) {
   try {
-    const result = await withTimeout(bridge.apiGet(endpoint, params || {}), 150000, "GET " + endpoint);
+    const result = await withTimeout(bridge.apiGet(endpoint, params || {}), 8000, "GET " + endpoint);
     diagLog(`GET ${endpoint} 成功`);
     return result;
   } catch (err) {
@@ -231,7 +231,7 @@ async function apiGet(endpoint, params) {
 async function apiPost(endpoint, body) {
   try {
     diagLog(`POST ${endpoint} 发出: ${JSON.stringify(body || {}).slice(0, 100)}`);
-    const result = await withTimeout(bridge.apiPost(endpoint, body || {}), 180000, "POST " + endpoint);
+    const result = await withTimeout(bridge.apiPost(endpoint, body || {}), 8000, "POST " + endpoint);
     diagLog(`POST ${endpoint} 成功`);
     return result;
   } catch (err) {
@@ -720,10 +720,15 @@ async function render() {
     if (state.current === "judge") await renderJudge().catch((err) => diagLog(`判定页异常: ${err.message}`));
     if (state.current === "debug") await renderDebug().catch((err) => diagLog(`调试页异常: ${err.message}`));
     if (state.current === "thanks") await renderThanks();
-    // 过期校验：渲染期间如果又切了标签，重新渲染当前页，保证最终显示正确
+    // 过期校验：渲染期间如果又切了标签，这里**不再递归重渲染**
+    // （递归会再次递增序号，快速连点时有死循环风险）。
+    // 改为：只记日志，并清掉可能残留的「加载中…」占位，让下一次点页签重新渲染。
     if (seq !== state.renderSeq) {
-      diagLog(`渲染序号过期（${seq} → ${state.renderSeq}），重渲染当前页`);
-      render();
+      diagLog(`渲染序号过期（${seq} → ${state.renderSeq}），放弃本次写入`);
+      const stale = $("#view");
+      if (stale && stale.querySelector(".loading")) {
+        stale.innerHTML = '<div class="section"><p class="section-desc">已切换到其它页签，请重新点一次。</p></div>';
+      }
       return;
     }
   } catch (err) {
