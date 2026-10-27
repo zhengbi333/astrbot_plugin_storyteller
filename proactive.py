@@ -48,6 +48,26 @@ class ProactiveManager:
     等对方先开口；用户回复即全部归位。
     """
 
+    def _mood_proactive_factor(self) -> float:
+        """主动搭话的心情倍率（调子高 → 倍率小 → 冷却短）。失败返回 1.0。"""
+        try:
+            plugin = self._plugin
+            if not plugin.config.bool("mood.effect_enabled", True):
+                return 1.0
+            store = getattr(plugin, "presence_store", None)
+            if store is None:
+                return 1.0
+            presence = store.load() or {}
+            from .presence import mood_factor
+
+            return mood_factor(
+                presence, "tone",
+                strength=float(plugin.config.float("mood.effect_proactive", 0.5) or 0.5),
+                direction=-1,
+            )
+        except Exception:
+            return 1.0
+
     def __init__(self, plugin: Any):
         self._plugin = plugin
         self._loop_task: asyncio.Task | None = None
@@ -550,6 +570,11 @@ class ProactiveManager:
         # 刚聊完顺延（0.238：面板「立即尝试一次」是手动动作，force=True 时不受此时限；
         # 其余门槛——免打扰/每日上限/静默闸门——仍然生效，手动也不该半夜炸醒对方）
         cooldown = max(0, self._config().int("proactive.cooldown_after_chat_minutes", 30))
+        # P1-5：调子轻快 → 冷却更短（更愿意凑上来）；低沉 → 更久
+        try:
+            cooldown = max(0, int(round(cooldown * self._mood_proactive_factor())))
+        except Exception:
+            pass
         last_chat = self._last_interaction.get(user)
         if not force and last_chat and _now_ts() - last_chat < cooldown * 60:
             return False, f"刚聊完 {cooldown} 分钟内不打扰"

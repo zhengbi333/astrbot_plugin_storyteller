@@ -20,6 +20,34 @@ _COLD_MOOD_WORDS = (
 )
 
 
+def mood_factor(presence: dict, dim: str, *, strength: float = 0.5, direction: int = 1) -> float:
+    """按心情状态算一个倍率（1.0 = 不影响）。
+
+    presence 的三张表：
+      tone     -1..1（低沉 → 轻快）
+      tempo    -1..1（慢 → 急）
+      battery   0..1（亏 → 满）
+
+    direction = 1：值越大倍率越大；direction = -1：值越大倍率越小。
+    strength 是影响强度（0 = 完全不影响，1 = 最大）。默认 0.5 属于温和。
+    """
+    try:
+        if dim == "battery":
+            # 注意：不能用 `or 0.5` —— 电量 0 是合法值（电量耗尽），会被 falsy 判成"没值"
+            raw_value = presence.get("battery", 0.5)
+            raw = 0.5 if raw_value is None else float(raw_value)
+            base = (max(0.0, min(1.0, raw)) - 0.5) * 2.0
+        else:
+            value = presence.get(dim, 0.0)
+            base = float(value if value is not None else 0.0)
+            base = max(-1.0, min(1.0, base))
+    except Exception:
+        return 1.0
+    k = max(0.0, min(1.0, float(strength)))
+    factor = 1.0 + base * k * (1 if direction >= 0 else -1)
+    return max(0.15, min(2.5, factor))
+
+
 def sanitize_mood(text: str) -> str:
     """把 mood 里会让人变冷的说法换掉（mood 是 LLM 生成的，拦不住措辞，只能读时兜底）。"""
     import re as _re

@@ -467,6 +467,36 @@
       }
     }
   },
+  "mood": {
+    "description": "心情怎么影响行为",
+    "type": "object",
+    "items": {
+      "effect_enabled": {
+        "description": "让心情影响行为",
+        "type": "bool",
+        "default": true,
+        "hint": "打开后，心情（调子/转速/电量）会真的改变三件事：发表情包的频率、回复的快慢、主动找你的积极性。关掉的话，心情只影响说话内容，不影响行为节奏。"
+      },
+      "effect_emoji": {
+        "description": "电量影响表情频率（强度）",
+        "type": "float",
+        "default": 0.5,
+        "hint": "电量满时更容易发表情，电量低时不爱发。0 = 不影响，1 = 最多差 2 倍。"
+      },
+      "effect_pace": {
+        "description": "转速影响回复快慢（强度）",
+        "type": "float",
+        "default": 0.5,
+        "hint": "转速急时回得快、间隔变短；转速慢时拖一点。0 = 不影响，1 = 最多差 2 倍。"
+      },
+      "effect_proactive": {
+        "description": "调子影响主动搭话（强度）",
+        "type": "float",
+        "default": 0.5,
+        "hint": "调子轻快时更愿意主动找你、冷却更短；低沉时安静。0 = 不影响，1 = 最多差 2 倍。"
+      }
+    }
+  },
   "schedule": {
     "description": "日程锚",
     "type": "object",

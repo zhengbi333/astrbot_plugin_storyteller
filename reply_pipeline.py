@@ -141,6 +141,23 @@ def parse_judge(text: str) -> dict[str, Any] | None:
 class ReplyPipeline:
     """主链回复的二次处理：润色 + 判定 + 占位符。"""
 
+    def _mood_emoji_factor(self) -> float:
+        """表情概率的心情倍率（电量高 → 更爱发）。失败一律返回 1.0，不影响原行为。"""
+        try:
+            plugin = getattr(self, "_plugin_obj", None) or getattr(self, "plugin", None) or self._plugin
+            if not plugin.config.bool("mood.effect_enabled", True):
+                return 1.0
+            store = getattr(plugin, "presence_store", None)
+            if store is None:
+                return 1.0
+            presence = store.load() or {}
+            from .presence import mood_factor
+
+            return mood_factor(presence, "battery", strength=float(
+                plugin.config.float("mood.effect_emoji", 0.5) or 0.5), direction=1)
+        except Exception:
+            return 1.0
+
     def __init__(self, plugin: Any):
         self._plugin = plugin
 
@@ -209,6 +226,8 @@ class ReplyPipeline:
                 pass
         try:
             prob = max(0.0, min(1.0, float(self._config().float("emoji.send_probability", 0.25))))
+            # P1-5：电量满时更爱发表情（强度可配，0 = 不影响）
+            prob = max(0.0, min(1.0, prob * self._mood_emoji_factor()))
         except Exception:
             prob = 0.25
         if store is not None and user:
@@ -368,6 +387,7 @@ class ReplyPipeline:
                 except Exception:
                     pass
             prob = max(0.0, min(1.0, self._config().float("emoji.send_probability", 0.25)))
+            prob = max(0.0, min(1.0, prob * self._mood_emoji_factor()))
             if store is not None and user:
                 # 按分类权重微调概率（反馈学习：升/降集）
                 try:

@@ -121,6 +121,26 @@ def _hard_split(seg: str, max_len: int) -> list[str]:
 class ReplyBufferManager:
     """每会话的发送缓冲 + 抢话裁决。"""
 
+    def _mood_pace_factor(self) -> float:
+        """回复间隔的心情倍率（转速高 → 倍率小 → 回得快）。失败返回 1.0。"""
+        try:
+            plugin = self._plugin
+            if not plugin.config.bool("mood.effect_enabled", True):
+                return 1.0
+            store = getattr(plugin, "presence_store", None)
+            if store is None:
+                return 1.0
+            presence = store.load() or {}
+            from .presence import mood_factor
+
+            return mood_factor(
+                presence, "tempo",
+                strength=float(plugin.config.float("mood.effect_pace", 0.5) or 0.5),
+                direction=-1,
+            )
+        except Exception:
+            return 1.0
+
     def __init__(self, plugin: Any):
         self._plugin = plugin
         self._queues: dict[str, list[dict[str, Any]]] = {}
@@ -161,7 +181,13 @@ class ReplyBufferManager:
         length = len(str(item.get("text") or ""))
         # 短句快（0.9s 起）、长句慢（2.5s 起），按比例映射
         ratio = min(1.0, length / 60.0)
-        return random.uniform(lo + ratio * 0.4, lo + ratio * (hi - lo))
+        delay = random.uniform(lo + ratio * 0.4, lo + ratio * (hi - lo))
+        # P1-5：转速急 → 间隔变短；转速慢 → 拖一点（强度可配，0 = 不影响）
+        try:
+            delay *= self._mood_pace_factor()
+        except Exception:
+            pass
+        return max(0.2, delay)
 
     # ------------------------------------------------------------ 提交与发送
 

@@ -9,6 +9,14 @@
 
 
 
+
+## alpha-0.274（当前）
+
+- **P1-5 心情影响行为概率**：以前心情只改措辞，不改行为。现在电量 → 表情概率、转速 → 回复间隔、调子 → 主动搭话冷却。换算放在 `presence.py`（不新建模块），强度全部进 `mood` 配置组（默认 0.5 温和），总开关可关。
+- 测试抓到真 bug：`battery=0`（电量耗尽）被 `or 0.5` 当成电满，已修。
+- `audit_90_mood_effect.py` **25/25**。
+- 详见 [changelogs/alpha-0.274.md](changelogs/alpha-0.274.md)。
+
 ## alpha-0.273（当前）
 
 - **P0-4 默认安全**：查证发现总开关 `astrbot_tools_enabled` **默认就是 false**，所以默认不给工具已成立；真正的隐患是「白名单留空 = 全给」。新增配置 `capabilities.astrbot_tools_empty_means`（`all` 默认 / `none` 更安全），白名单非空时两种模式行为一致，不破坏老配置。
