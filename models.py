@@ -303,7 +303,10 @@ async def chat_with_tools(
     if info is None:
         raise _DirectUnavailable("提取不到 OpenAI 兼容直连信息")
     if not tools:
-        raise _ToolsUnsupported("没有可用工具")
+        # 0.257：这里原来抛 _ToolsUnsupported，等于把「这次没工具」误判成
+        # 「provider 不支持 tools」，调用方会置永久降级 —— 此后她再也没有工具，
+        # 只能聊天和画图（真机「做个文档变成画画」就是这么来的）。
+        raise _DirectUnavailable("本次没有可用工具")
 
     body: dict = {
         "model": info["model"],
@@ -336,8 +339,15 @@ async def chat_with_tools(
                         disable_thinking=False, max_tokens=max_tokens,
                         max_think_chars=max_think_chars, max_chars=max_chars, tool_choice=tool_choice,
                     )
-                raise _ToolsUnsupported(
-                    f"提供方不接受 tools 参数：HTTP {resp.status_code} {buf.decode('utf-8', 'replace')[:120]}"
+                # 0.257：400/422 也可能是「别的参数不合法」（stream_options、tools 格式等），
+                # 只有报文里明确点出 tools/function 才算「不支持原生工具」。
+                lower = detail.lower()
+                if "tool" in lower or "function" in lower:
+                    raise _ToolsUnsupported(
+                        f"提供方不接受 tools 参数：HTTP {resp.status_code} {detail[:120]}"
+                    )
+                raise RuntimeError(
+                    f"直连上游 HTTP {resp.status_code}（非 tools 相关）：{detail[:150]}"
                 )
             if resp.status_code != 200:
                 buf = await resp.aread()

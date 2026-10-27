@@ -354,7 +354,10 @@ class StorytellerPlugin(Star):
         self._cap_usage: dict[str, int] = {}       # 0.197：能力每日用量（key = "能力:日期"）
         self._load_runtime_state()
         self._cap_shared: dict[str, float] = {}    # 0.197：能力分享冷却（分享内心：同一条不重复念叨）
-        self._native_tools_unsupported = False     # 0.200：提供方拒绝原生工具时置位 → 自动恢复正则兜底
+        self._native_tools_unsupported = False
+        # 0.257：降级改成**带冷却**——原来一置位就只有重启才恢复，
+        # 一次误判（空工具/参数错误）就让她永久失去全部工具。
+        self._native_tools_retry_at = 0.0     # 0.200：提供方拒绝原生工具时置位 → 自动恢复正则兜底
         self._cap_log: list[dict] = []             # 0.201：能力调用日志（面板「能力清单」观测用）
         self._inner_injected: dict[str, set] = {}  # 0.204：思绪已回注的 id（同一条不反复回注）
         self._my_recent_replies: dict[str, list[str]] = {}  # 0.211：我最近说出口的几句话（口头禅检查用）
@@ -2479,7 +2482,10 @@ class StorytellerPlugin(Star):
                     # 0.199：原生工具优先（真 function calling）；不支持时自动降级（文本协议/普通生成）
                     _cap_tools: list = []
                     try:
-                        if self.config.bool("capabilities.enabled", True) and self.config.bool("capabilities.native_tools", True) and not self._native_tools_unsupported:
+                        if (self.config.bool("capabilities.enabled", True)
+                                and self.config.bool("capabilities.native_tools", True)
+                                and (not self._native_tools_unsupported
+                                     or time.time() >= getattr(self, "_native_tools_retry_at", 0.0))):
                             # 0.200：本轮正则兜底已做过的动作，不再给模型（消除双重执行）
                             _cap_tools = build_tool_schemas(self, "接管", exclude=caps_done(event))
                             # 0.241：并入 AstrBot 已激活工具（含 MCP 与其它插件），开关默认关
@@ -3049,8 +3055,10 @@ class StorytellerPlugin(Star):
                     timeout=150,
                 )
             except _ToolsUnsupported as exc:
-                # 0.200：提供方拒绝原生工具 → 永久降级（本进程内），并恢复正则兜底
+                # 0.200：提供方拒绝原生工具 → 降级（本进程内）
+                # 0.257：改成带冷却的降级 —— 10 分钟后自动重试，不再等重启
                 self._native_tools_unsupported = True
+                self._native_tools_retry_at = time.time() + 600
                 logger.info(
                     "[Storyteller] 提供方不接受原生工具，已降级为文本协议并恢复正则兜底: %s", str(exc)[:100]
                 )
