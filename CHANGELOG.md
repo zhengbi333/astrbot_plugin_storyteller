@@ -8,6 +8,14 @@
 
 
 
+
+## alpha-0.273（当前）
+
+- **P0-4 默认安全**：查证发现总开关 `astrbot_tools_enabled` **默认就是 false**，所以默认不给工具已成立；真正的隐患是「白名单留空 = 全给」。新增配置 `capabilities.astrbot_tools_empty_means`（`all` 默认 / `none` 更安全），白名单非空时两种模式行为一致，不破坏老配置。
+- `audit_89_default_safety.py` **10/10**（含与 P0-1 群聊隔离不冲突的验证）。
+- 面板「一键启用推荐 13 项」按钮与首页提示**本轮未做**，原因写在 changelog。
+- 详见 [changelogs/alpha-0.273.md](changelogs/alpha-0.273.md)。
+
 ## alpha-0.272（当前）
 
 - **自我纠正**：0.270 把「群聊禁用工具」写死成常量，违背了我们「一切开关在配置里」的原则。现在改成配置项 `capabilities.group_blocked_tools`（默认值不变 = 原来 13 项，行为一致），面板可改、可清空；并把它进缓存键（改配置立即生效）。

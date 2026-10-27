@@ -3267,7 +3267,19 @@ class StorytellerPlugin(Star):
 
     def _astrbot_tool_allowlist(self) -> set[str]:
         raw = str(self.config.get("capabilities.astrbot_tools_allowlist", "") or "")
-        return {x.strip() for x in raw.replace("，", ",").split(",") if x.strip()}
+        names = {x.strip() for x in raw.replace("，", ",").split(",") if x.strip()}
+        if names:
+            return names
+        # 白名单为空：由配置决定是「全给」还是「一个都不给」
+        mode = ""
+        try:
+            mode = str(self.config.get("capabilities.astrbot_tools_empty_means", "all") or "all").strip().lower()
+        except Exception:
+            mode = "all"
+        if mode == "none":
+            # 用哨兵表示"没有任何工具"（bundle 里会在白名单过滤时把全部挡掉）
+            return {"__none__"}
+        return set()
 
     def _astrbot_tool_manager(self) -> Any:
         """取 AstrBot 的 FunctionToolManager（拿不到就返回 None）。"""
