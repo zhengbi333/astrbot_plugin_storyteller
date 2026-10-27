@@ -2600,12 +2600,19 @@ class StorytellerPlugin(Star):
                     # 0.264：模板里写了 {守则} 就由占位符摆放，不再追加到末尾（避免重复两遍）
                     if "{守则}" in str(self.config.get("intercept.template", "") or ""):
                         logger.debug("[Storyteller] 模板含 {守则}，跳过末尾追加")
+                    elif self.config.bool("intercept.stable_prefix", False):
+                        # P1-6：守则最长（1500+ 字）且每轮完全一致，提到最前才能让前缀缓存命中
+                        final_system = _acting + "\n\n" + final_system
                     else:
                         final_system += "\n\n" + _acting
                 # 0.259：工具使用规范（照 DSH 系统提示的写法：通用规则，不是关键词表）
                 try:
                     if self._astrbot_tools_enabled() or self.config.bool("capabilities.enabled", True):
-                        final_system += "\n\n" + _TOOL_USAGE_RULES
+                        if self.config.bool("intercept.stable_prefix", False):
+                            # P1-6：工具规范同样稳定，提到最前（跟在守则前面，两段一起构成稳定前缀）
+                            final_system = _TOOL_USAGE_RULES + "\n\n" + final_system
+                        else:
+                            final_system += "\n\n" + _TOOL_USAGE_RULES
                 except Exception as _tr_exc:
                     logger.debug("[Storyteller] 注入工具规范失败（忽略）: %s", _tr_exc)
             except Exception as exc:

@@ -12,6 +12,14 @@
 
 
 
+
+## alpha-0.277（当前）
+
+- **P1-6 第二步：稳定前缀开关**。查清真相：`final_system` **第一段就是模板**，里面含 `{状态}`/`{日程}`/`{记忆}` 等每轮变化的占位符 → 前缀必然失效。新增 `intercept.stable_prefix`（**默认关**）：打开后把「守则+工具规范」（约 2000 字、每轮一致）提到最前，让 provider 的前缀缓存能命中；关闭则完全维持原顺序。
+- 澄清：我们是 **LLM 直连**，不存在「透传」问题，主链一定能拿到 `prompt_cache_hit_tokens`。
+- `audit_93_stable_prefix.py` **14/14**（含「换序不丢内容」与「前缀逐字节一致」实测）。
+- 详见 [changelogs/alpha-0.277.md](changelogs/alpha-0.277.md)。
+
 ## alpha-0.276（当前）
 
 - **P1-6 第一步：缓存可观测**。查证 AstrBot 侧（我们的直连通道）**能拿到** `prompt_cache_hit_tokens`，且 `models.py` 早就解析成 `usage.input_cached`；但 `TokenStore.record()` 没有这个字段，缓存数一路被丢。现在：①`_diag.log` 每次记录 cached/other/命中率/System 长度；②记账加 `cached_tokens`（不重复计入 input）。
