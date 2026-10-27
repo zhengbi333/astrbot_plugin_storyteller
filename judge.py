@@ -97,6 +97,7 @@ class Judge:
         instruction: str = "",
         timeout: float = DEFAULT_TIMEOUT,
         daily_limit: int = DEFAULT_DAILY_LIMIT,
+        provider_key: str = "",
     ) -> None:
         if fallback not in options:
             raise ValueError(f"兜底值 {fallback!r} 必须在候选里")
@@ -105,6 +106,8 @@ class Judge:
         self.fallback = fallback
         self.instruction = instruction
         self.timeout = max(2.0, min(30.0, float(timeout)))
+        # 这个判定用哪个模型：留空则走统一判定模型，再不行用当前模型
+        self.provider_key = str(provider_key or "")
         self.budget = JudgeBudget(daily_limit=daily_limit)
         self._cache: dict[str, tuple[str, float]] = {}
         self.stats = {"llm": 0, "cache": 0, "fallback": 0}
@@ -146,6 +149,35 @@ class Judge:
         raise JudgeError(f"输出不在候选里：{body[:40]}")
 
     # ------------------------------------------------------------ 判定
+    def resolve_provider(self, plugin: Any) -> Any:
+        """按「自己的配置 → 统一判定模型 → 当前模型」的顺序找 provider。"""
+        context = getattr(plugin, "context", None)
+
+        def _by_id(pid: str) -> Any:
+            if not pid or context is None:
+                return None
+            try:
+                return context.get_provider_by_id(pid)
+            except Exception:
+                return None
+
+        def _cfg(key: str) -> str:
+            try:
+                return str(plugin.config.get(key, "") or "").strip()
+            except Exception:
+                return ""
+
+        for key in (self.provider_key, "judge.provider_id"):
+            got = _by_id(_cfg(key))
+            if got is not None:
+                return got
+        try:
+            if context is not None:
+                return context.get_using_provider()
+        except Exception:
+            pass
+        return None
+
     async def judge(self, provider: Any, text: str, *, use_llm: bool = True) -> JudgeResult:
         """判定一段文本。LLM 优先，失败用兜底。永远不抛异常。"""
         body = str(text or "").strip()[:MAX_TEXT]
@@ -196,7 +228,9 @@ class Judge:
 
 
 # ---------------------------------------------------------------- 预置判定器
-# 生图：不是「要不要画」，而是「这句话要的是什么」。选项覆盖常见交付物。
+# 每个判定器绑定**自己模块**的 provider 配置键；留空则回退到 judge.provider_id，再回退当前模型。
+
+# 生图：不是「要不要画」，而是「这句话要的是什么」。
 IMAGE_KIND = Judge(
     "image_kind",
     options=("画图", "文档", "其他"),
@@ -207,6 +241,7 @@ IMAGE_KIND = Judge(
         "文档 = 要一份文件（文档/报告/表格/纪要/清单/Word/Excel/PDF）。\n"
         "其他 = 普通聊天、提问、别的任务。"
     ),
+    provider_key="image.judge_provider_id",
 )
 
 # 搜索：是否要联网查
@@ -219,6 +254,7 @@ SEARCH_NEED = Judge(
         "要查 = 问的是实时/外部事实（价格、新闻、版本、某公司/产品现在的情况）。\n"
         "不用 = 查本地信息（日程、消息、文件）、闲聊、或她能自己回答的。"
     ),
+    provider_key="search.provider_id",
 )
 
 # 情绪事件：这句话让她什么感受
@@ -227,6 +263,7 @@ EMOTION_EVENT = Judge(
     options=("被骂", "被夸", "被表白", "被撒娇", "被冷落", "被关心", "吵架", "普通"),
     fallback="普通",
     instruction="判断这句话对她的情绪影响，只输出候选里的一个词。",
+    provider_key="emotion.provider_id",
 )
 
 # 撤回：对方是否在说她理解错了
@@ -239,6 +276,47 @@ RECALL_NEED = Judge(
         "要撤回 = 明确纠正（不是这个意思/我说的是…/你理解错了/重新回答）。\n"
         "不用 = 其他所有情况（包括「不用撤回」「算了」）。"
     ),
+    provider_key="recall.provider_id",
+)
+
+# 约定结算：这条行动是否兑现了这条约定
+PROMISE_SETTLE = Judge(
+    "promise_settle",
+    options=("兑现了", "没兑现"),
+    fallback="没兑现",
+    instruction=(
+        "判断「她刚做的这件事」有没有兑现「她之前答应的那件事」。\n"
+        "兑现了 = 行动就是那件事，或明确属于那件事的一部分。\n"
+        "没兑现 = 只是相关、只是同一类，或者根本是另一件事。"
+    ),
+    provider_key="promise.provider_id",
+)
+
+# 记忆去重：两段文字是不是同一件事
+MEMORY_DUP = Judge(
+    "memory_dup",
+    options=("重复", "不重复"),
+    fallback="不重复",
+    instruction=(
+        "判断两条记忆是不是在说同一件事（不是同一类，是同一件）。\n"
+        "重复 = 同一个人、同一件事、同样的结果。\n"
+        "不重复 = 只是主题相近。"
+    ),
+    provider_key="memory.profile_provider_id",
+)
+
+# 表情偏好：对方是不是在要求少发表情
+EMOJI_PREF = Judge(
+    "emoji_pref",
+    options=("少发", "多发", "无关"),
+    fallback="无关",
+    instruction=(
+        "判断对方对「发表情包」的态度。\n"
+        "少发 = 明确表示别发/不要发/不喜欢表情。\n"
+        "多发 = 明确表示可以发/喜欢表情。\n"
+        "无关 = 没表达态度。"
+    ),
+    provider_key="emoji.judge_provider_id",
 )
 
 ALL_JUDGES = {
@@ -246,6 +324,9 @@ ALL_JUDGES = {
     "search_need": SEARCH_NEED,
     "emotion_event": EMOTION_EVENT,
     "recall_need": RECALL_NEED,
+    "promise_settle": PROMISE_SETTLE,
+    "memory_dup": MEMORY_DUP,
+    "emoji_pref": EMOJI_PREF,
 }
 
 

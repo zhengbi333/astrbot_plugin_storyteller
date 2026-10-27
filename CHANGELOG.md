@@ -4,7 +4,15 @@
 
 
 
-## alpha-0.260（当前）
+## alpha-0.261（当前）
+
+- **judge.py：每个判定绑自己模块的模型**（三级回退：模块配置 → judge.provider_id → 当前模型）。
+- **判定器 4 → 7 个**：新增 `promise_settle`（约定是否兑现）、`memory_dup`（记忆是否重复）、`emoji_pref`（表情偏好）—— 这三个原来靠字面相似度/关键词。
+- **配置补齐**：新增 `judge` 组（模型/日限/超时）、`recall.provider_id`、`promise` 组；全部带中文说明。
+- 生图判定改用 `IMAGE_KIND.resolve_provider()`（优先 image.judge_provider_id）。
+- 详见 [changelogs/alpha-0.261.md](changelogs/alpha-0.261.md)。
+
+## alpha-0.260
 
 - **新规矩 R6**：能调 LLM 智能判定的就不写规则；规则只能当兜底，不能抢先。
 - **新建 `judge.py` 统一判定层**：缓存 10 分钟 / 日限 300 / 超时 6 秒 / 只输出一个词；四个预置判定器（生图类型、是否联网、情绪事件、是否撤回）。

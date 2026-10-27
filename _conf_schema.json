@@ -1518,6 +1518,30 @@
       }
     }
   },
+  "judge": {
+    "description": "统一判定（LLM 优先，规则兜底）",
+    "type": "object",
+    "items": {
+      "provider_id": {
+        "description": "统一判定模型",
+        "type": "string",
+        "default": "",
+        "hint": "各个判定（生图/搜索/情绪/撤回/约定/去重/表情偏好）默认用它。留空 = 用当前对话模型。各模块若单独配了模型，优先用模块自己的。"
+      },
+      "daily_limit": {
+        "description": "每天每类判定最多几次",
+        "type": "int",
+        "default": 300,
+        "hint": "每类判定单独计数（生图、搜索、情绪…各自 300）。用完就退回规则判定，不会报错。"
+      },
+      "timeout": {
+        "description": "单次判定超时（秒）",
+        "type": "float",
+        "default": 6.0,
+        "hint": "超过就放弃这次 LLM 判定、用规则兜底。别设太大，会拖慢回复。"
+      }
+    }
+  },
   "recall": {
     "description": "撤回（说错了能收回来）",
     "type": "object",
@@ -1527,6 +1551,24 @@
         "type": "bool",
         "default": false,
         "hint": "只在对方明确说「你理解错了 / 我说的是… / 你说错了」时，撤回自己刚发的那一条再重新回答。默认关。"
+      },
+      "provider_id": {
+        "description": "撤回判定模型",
+        "type": "string",
+        "default": "",
+        "hint": "判断对方是不是在说「你理解错了」。留空 = 用统一判定模型。"
+      }
+    }
+  },
+  "promise": {
+    "description": "约定结算（她答应的事做完了吗）",
+    "type": "object",
+    "items": {
+      "provider_id": {
+        "description": "约定判定模型",
+        "type": "string",
+        "default": "",
+        "hint": "判断「刚做的这件事」有没有兑现「之前答应的事」。留空 = 用统一判定模型。原来靠字面相似度，容易误判。"
       }
     }
   },

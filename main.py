@@ -1129,7 +1129,8 @@ class StorytellerPlugin(Star):
         # 真机事故：规则把「你做一个文档」判成画图并直接 return，LLM 根本没被问到。
         desc = detect_image_intent(text)
         try:
-            provider = self._judge_provider()
+            # 用判定器**自己的** provider 解析（image.judge_provider_id → judge.provider_id → 当前模型）
+            provider = judge_mod.IMAGE_KIND.resolve_provider(self)
             if provider is not None:
                 verdict = await judge_mod.IMAGE_KIND.judge(provider, text)
                 if verdict.value == "文档":
