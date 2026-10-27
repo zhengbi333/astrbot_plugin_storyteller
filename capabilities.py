@@ -610,7 +610,8 @@ _register(Capability(
     description=(
         "从图库挑一张表情包随本条回复发出。"
         "对方明确要表情包/要图时**必须调用本工具**；也可以在你觉得该配一张时主动用。"
-        "不要只在文字里写「给你发了/甩过去一张」——那只在文字里，用户收不到图。"
+        "不要只在文字里写「给你发了/甩过去一张」——那只在文字里，用户收不到图。\n"
+        "**边界**：对方要文档/文件/报告时不要用表情包顶替，那属于文档任务。"
     ),
     params={"category": "可选，分类标题；不给则用第一个有图的分类"},
     example='[DO:emoji_send]{"category":"表达轻微吐槽"}',
@@ -621,7 +622,14 @@ _register(Capability(
 _register(Capability(
     name="photo_take",
     title="画/拍一张图发过去",
-    description="画一张图（或角色自拍）并直接发给对方——想分享眼前画面、或对方想看时用",
+    description=(
+        "画一张图（或角色自拍）并直接发给对方。\n"
+        "**用**：对方要看画面（「画一只猫」「拍张自拍」「给我看看你」「来张风景」），"
+        "或你想分享眼前景象。\n"
+        "**不要用**：对方要的是**文档 / 文件 / 报告 / 表格 / 纪要 / Word / PDF** —— "
+        "那要产出可打开的文件，用 toolbox_doc_write 写、再用 toolbox_send_file 发；"
+        "用画图只会给他一张图片。"
+    ),
     params={"prompt": "画面描述（谁/在哪/在做什么）", "selfie": "可选 true=角色本人出镜"},
     example='[DO:photo_take]{"prompt":"窗台上晒太阳的白猫，水彩风"}',
     daily_limit_key="image.max_daily",
