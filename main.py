@@ -10,6 +10,7 @@ import asyncio
 import json
 
 from . import acting as acting_mod
+from . import context_budget as budget_mod
 import importlib
 import re
 import time
@@ -2162,6 +2163,18 @@ class StorytellerPlugin(Star):
             # 0.162 对话语义标签已改为 0.164 的 _labelize_anchors（模板内直接带标签，不再追加【本次对话】段
             # 避免"裸文本+带标签补丁"并存的重复混乱）
             template_has_current = "{当前说话}" in template
+            # 0.247：上下文预算——长对话时把较早消息压成摘要，避免超窗后丢掉近期内容。
+            # 放在 system 定稿之后，因为预算要算上 system 本身。
+            try:
+                _budget = budget_mod.apply_to_request(
+                    req,
+                    max_chars=self.config.int("context.max_chars", 14000),
+                    keep_recent=self.config.int("context.keep_recent", 8),
+                )
+                if _budget.changed:
+                    logger.info("[Storyteller] 上下文压缩：%s", budget_mod.describe(_budget))
+            except Exception as _budget_exc:
+                logger.debug("[Storyteller] 上下文预算失败（忽略）: %s", _budget_exc)
             req.system_prompt = final_system
             req.prompt = (
                 "请以以上设定的身份、本次对话上下文，自然回应对方刚刚说的话。"
@@ -3469,10 +3482,69 @@ class StorytellerPlugin(Star):
             )
             if memory_id:
                 logger.info("[Storyteller] 外部行动已写入记忆：%s", str(text)[:60])
-            return {"ok": bool(memory_id), "memory_id": memory_id, "reason": "" if memory_id else "empty_id"}
+            # 0.247：认知真的把事做完了 → 顺手结算相关约定，避免"事已做完、约定还挂着"。
+            settled = 0
+            if str(kind) in ("doc_write", "doc_export", "send_file", "learn", "download"):
+                try:
+                    settled = self._settle_promises_for_action(str(text or ""))
+                except Exception as exc:
+                    logger.debug("[Storyteller] 约定结算失败（忽略）: %s", exc)
+            return {
+                "ok": bool(memory_id),
+                "memory_id": memory_id,
+                "settled": settled,
+                "reason": "" if memory_id else "empty_id",
+            }
         except Exception as exc:
             logger.warning("[Storyteller] 外部事件记忆写入失败: %s", exc)
             return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+    def _settle_promises_for_action(self, action_text: str) -> int:
+        """把"我刚做完的事"与挂着未结算的约定对齐，命中就标记结算。
+
+        匹配方式：取约定文本与行动文本的**共同二字片段**（中文没有空格，字符二元组足够区分），
+        至少命中 2 个不同片段才算相关，避免"做文档"这种泛词误伤所有约定。
+        返回结算条数。
+        """
+        text = str(action_text or "").strip()
+        if len(text) < 6:
+            return 0
+
+        def bigrams(source: str) -> set[str]:
+            cleaned = "".join(ch for ch in source if ch.strip())
+            return {cleaned[i:i + 2] for i in range(len(cleaned) - 1)}
+
+        action_grams = bigrams(text)
+        if not action_grams:
+            return 0
+        engine = getattr(self, "_inspiration_engine", None)
+        if engine is None:
+            return 0
+        settled = 0
+        try:
+            items = self._recent_promise_items(limit=12)
+        except Exception:
+            return 0
+        for item in items or []:
+            promise_text = str(item.get("text") or "").strip()
+            user = str(item.get("user") or "")
+            if not promise_text or not user:
+                continue
+            try:
+                if engine.promise_is_settled(user, promise_text):
+                    continue
+            except Exception:
+                continue
+            shared = action_grams & bigrams(promise_text)
+            if len(shared) < 2:
+                continue
+            try:
+                engine.mark_promise_settled(user, promise_text)
+                settled += 1
+                logger.info("[Storyteller] 因外部行动结算约定：%s", promise_text[:40])
+            except Exception:
+                continue
+        return settled
 
     def _get_memory_bridge(self) -> Any:
         try:
