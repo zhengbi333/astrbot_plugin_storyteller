@@ -4449,6 +4449,32 @@ async function renderJudge() {
     </div>`;
   }
   html += "</div>";
+  // P1-10：最近几次注入了哪几条记忆（数据来自记忆插件的 injection_logs）
+  try {
+    const mem = await apiGet("memory/recent");
+    if (mem && mem.rounds && mem.rounds.length) {
+      html += '<div class="sect"><h3>最近想起的记忆</h3><div class="rule"></div></div>';
+      html += '<div class="list">';
+      for (const r of mem.rounds) {
+        const items = (r.items || []).map((it) => `<div class="d">· ${esc(it.summary || it.id)}</div>`).join("");
+        html += `<div class="row">
+          <div class="id">${esc((r.created_at || "").slice(11, 19))}</div>
+          <div class="main">
+            <div class="t">${esc(r.query || "（无检索词）")}</div>
+            ${items || '<div class="d">（这一轮没有命中具体条目）</div>'}
+          </div>
+          <div class="r">${r.chars || 0} 字<br />${(r.items || []).length} 条</div>
+        </div>`;
+      }
+      html += "</div>";
+    } else if (mem && mem.error) {
+      html += `<div class="sect"><h3>最近想起的记忆</h3><div class="rule"></div></div>
+        <div class="list"><div class="row"><div class="main"><div class="d">${esc(mem.error)}</div></div></div></div>`;
+    }
+  } catch (err) {
+    html += `<div class="sect"><h3>最近想起的记忆</h3><div class="rule"></div></div>
+      <div class="list"><div class="row"><div class="main"><div class="d">读取失败：${esc(err.message)}</div></div></div></div>`;
+  }
   html += '<div class="sect"><h3>说明</h3><div class="rule"></div></div>';
   html += `<div class="list"><div class="row"><div class="id">R6</div>
     <div class="main"><div class="t">判定一律 LLM 优先，规则只当兜底</div>

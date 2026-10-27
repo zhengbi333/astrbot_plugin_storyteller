@@ -14,6 +14,12 @@
 
 
 
+
+## alpha-0.279（当前）
+
+- P1-10：面板显示「最近想起的记忆」
+- 详见 [changelogs/alpha-0.279.md](changelogs/alpha-0.279.md)。
+
 ## alpha-0.278（当前）
 
 - P1-9：记忆冲突合并（判定侧）

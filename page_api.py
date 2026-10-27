@@ -200,6 +200,7 @@ class StorytellerWebApi:
             (f"{prefix}/appearance/background/select", self.appearance_background_select, ["POST"], "Storyteller background select"),
             (f"{prefix}/appearance/background/clear", self.appearance_background_clear, ["POST"], "Storyteller background clear"),
             (f"{prefix}/judge/stats", self.judge_stats, ["GET"], "Storyteller judge stats"),
+        (f"{prefix}/memory/recent", self.memory_recent, ["GET"], "Storyteller recent memory injections"),
         (f"{prefix}/acting/sections", self.acting_sections, ["GET"], "Storyteller acting sections"),
         (f"{prefix}/acting/save", self.acting_save, ["POST"], "Storyteller save acting section"),
             (f"{prefix}/config/schema", self.config_schema, ["GET"], "Storyteller config schema"),
@@ -335,6 +336,32 @@ class StorytellerWebApi:
                 "data_dir": str(self._plugin.data_dir),
             }
         )
+
+    # ------------------------------------------------------------- 最近想起的记忆（P1-10）
+
+    async def memory_recent(self) -> Any:
+        """最近几次「记忆注入」用了哪几条 —— 回答「她为什么这样回」。
+
+        数据来自记忆插件的 injection_logs 表（它一直在记，只是之前没有接口读）。
+        """
+        try:
+            plugin = self._plugin
+            getter = getattr(plugin, "_get_memory_bridge", None)
+            bridge = getter() if callable(getter) else None
+            if bridge is None:
+                return await _fail("没连上记忆插件（可能没装【为你篆刻的历史】，或桥接没开）")
+            reader = getattr(bridge, "recent_injections", None)
+            if not callable(reader):
+                return await _fail("记忆插件版本较旧，没有 recent_injections 接口")
+            rows = reader(10) or []
+            total_items = sum(len(r.get("items") or []) for r in rows)
+            return await _ok({
+                "rounds": rows,
+                "count": len(rows),
+                "total_items": total_items,
+            })
+        except Exception as exc:
+            return await _fail(f"读取记忆注入记录失败：{type(exc).__name__}: {exc}")
 
     # ------------------------------------------------------------- 判定（R6）
 
