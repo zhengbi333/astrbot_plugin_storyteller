@@ -269,6 +269,18 @@
         "type": "float",
         "default": 2.5,
         "hint": "连续短消息不重复调用判定模型（节流），减少判定调用次数与等待。"
+      },
+      "media_followup_merge": {
+        "description": "图文合并（纯图片不单独回复）",
+        "type": "bool",
+        "default": true,
+        "hint": "紧跟在一条消息之后的纯图片/表情，当作那条的补充，不单独触发一次回复。不这样的话她常常只回那张图，和上文割裂。"
+      },
+      "media_followup_seconds": {
+        "description": "图文合并间隔（秒）",
+        "type": "int",
+        "default": 12,
+        "hint": "纯图片与上一条消息相隔多少秒内算「一起的」（3~30）。超过这个时间单独发图仍会正常回应。"
       }
     }
   },

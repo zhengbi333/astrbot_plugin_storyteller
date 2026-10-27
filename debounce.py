@@ -80,6 +80,8 @@ class DebounceManager:
         self._smart_history: list[dict[str, Any]] = []   # 智能判定事件（面板展示）
         self._smart_limit = 30
         self._lock = threading.Lock()
+        # 0.252 图文合并：每个会话上一条消息的时间
+        self._last_media_anchor: dict[str, float] = {}
 
     def _config(self) -> Any:
         return getattr(self._plugin, "config", None)
@@ -457,6 +459,15 @@ class DebounceManager:
             if self.private_only() and "group" in uid.lower():
                 return False
             text, images, retained, segments = self._extract_content(event, message_obj)
+            # 0.252 图文合并：纯媒体消息（只有图/表情、没有文字）如果是「跟着上一条来的」，
+            # 就当作那条的补充静默吞掉 —— 否则它会单独开窗口、单独触发一次回复，
+            # 看起来就是「她只回了那张图」，和上文割裂。
+            if self._swallow_media_followup(event, uid, text, images, retained):
+                self._silence(event)
+                return True
+            # 有文字的消息：记下时间，供后续纯媒体判断"是不是跟上一条一起的"
+            if str(text or "").strip():
+                self._last_media_anchor[uid] = time.time()
             if not text and not images and not retained:
                 return False
             # 命令判定：解析后的文本可能已被 AstrBot 剥离命令前缀（如 /reset -> reset），
@@ -815,6 +826,52 @@ class DebounceManager:
                 del self._history[: len(self._history) - self._history_limit]
 
     # ------------------------------------------------------------- 工具
+
+    # ---------------------------------------------------------- 0.252 图文合并
+
+    def _media_followup_gap(self) -> float:
+        """纯媒体消息视为「跟上一条一起的」的最大间隔（秒）。"""
+        try:
+            return max(3.0, min(30.0, float(
+                self._config().get("debounce.media_followup_seconds", 12.0) or 12.0
+            )))
+        except Exception:
+            return 12.0
+
+    def _swallow_media_followup(
+        self, event: Any, uid: str, text: str, images: list, retained: list,
+    ) -> bool:
+        """纯媒体消息且紧跟在上一条之后 → True（调用方静默吞掉，不回复）。
+
+        全满足才吞：
+        1. 这条**没有任何文字**，但有图/表情/文件；
+        2. 这个会话**刚刚**有过一条消息（默认 12 秒内）；
+        3. 开关 `debounce.media_followup_merge` 打开（默认开）。
+        只发图不说话、且隔了很久 → 不吞（那可能是「发图给你看」，该回应）。
+        """
+        try:
+            if not self._config().bool("debounce.media_followup_merge", True):
+                return False
+            if str(text or "").strip():
+                return False
+            if not images and not retained:
+                return False
+            now = time.time()
+            last = float(self._last_media_anchor.get(uid, 0.0) or 0.0)
+            self._last_media_anchor[uid] = now
+            if last <= 0:
+                return False
+            gap = now - last
+            if gap > self._media_followup_gap():
+                return False
+            logger.info(
+                "[Storyteller] 图文合并：%.1fs 内的纯媒体消息视为补充，不单独回复 session=%s",
+                gap, uid,
+            )
+            return True
+        except Exception as exc:
+            logger.debug("[Storyteller] 图文合并判定失败（放行）: %s", exc)
+            return False
 
     @staticmethod
     def _silence(event: Any) -> None:

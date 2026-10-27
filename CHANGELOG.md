@@ -2,7 +2,12 @@
 
 完整按版本日志见 [changelogs/](changelogs/) 目录。
 
-## alpha-0.251（当前）
+## alpha-0.252（当前）
+
+- **修图文割裂**：真机查到根因是 `debounce.window=2.0` 在「打字 3 秒 + 发表情 4 秒」的节奏里结算两次，图片落到第二个窗口单独触发回复。现在**纯媒体消息紧跟在上一条之后（默认 12 秒内）视为补充、静默吞掉**，不再单独回一句。开关 `debounce.media_followup_merge` / `media_followup_seconds`。
+- 新用例 `audit_79` **18/18**。详见 [changelogs/alpha-0.252.md](changelogs/alpha-0.252.md)。
+
+## alpha-0.251
 
 - **新增撤回**：发出回复后记下 `message_id`，对方说「你理解错了 / 我说的是… / 撤回」时，在 OneBot 115 秒时限内撤掉自己那条再重答。只认明确纠正，不做模糊判断；默认关。
 - 纠正上一轮误判：`relationships.json` 实际 565 字节、`affection=0.412`，关系模块一直正常（我查错了文件名）。冷淡原因只有 tone/mood/守则三条。
