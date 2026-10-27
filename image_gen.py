@@ -491,6 +491,14 @@ _SEND_NOISE = ("发给我看一看", "发给我看看", "发给你看看", "发�
                "发出去", "发消息", "给我看看", "给我看", "我看看", "发张")
 
 
+# 0.259：交付物词 —— 出现这些说明用户要的是**文件**，不是画面
+_DELIVERABLE_WORDS = (
+    "文档", "报告", "表格", "清单", "纪要", "总结", "汇报", "简历", "方案",
+    "文件", "附件", "ppt", "PPT", "word", "Word", "excel", "Excel",
+    "pdf", "PDF", "docx", "xlsx", "幻灯片", "演示稿", "台账", "统计表",
+)
+
+
 def detect_image_intent(text: str) -> str:
     """检测「明确请求画/生图」意图，返回画面描述（空串=未命中）。
 
@@ -502,6 +510,10 @@ def detect_image_intent(text: str) -> str:
     """
     raw = str(text or "").strip()
     if not raw or len(raw) > 300:
+        return ""
+    # 0.259：要「交付物」的请求不是画图请求。
+    # 真机「你做一个文档，发我，内容是…」就因为「做」+「个」被判成了画图。
+    if any(word in raw for word in _DELIVERABLE_WORDS):
         return ""
     for neg in _NEGATIVE_HITS:
         if neg in raw:
@@ -530,7 +542,8 @@ def detect_image_intent(text: str) -> str:
     # 残余短词归一（「拍个照发我」剥掉后只剩「照」）
     if tail in ("照", "拍"):
         tail = "照片"
-    quantifier = bool(re.search(r"[一]?[张幅个只条头朵座]|一下|好", m.group(1)))
+    # 0.259：量词只认画面类；「个」是通用量词（一个文档/一个报告），不能算画图信号
+    quantifier = bool(re.search(r"[一]?[张幅只条头朵座]|一下|好", m.group(1)))
     if not quantifier and not any(w in tail[:60] for w in _PICTURE_WORDS):
         return ""  # 裸「画/拍」且尾段不像画面对象（画完了/画重点等）→ 不拦截
     return tail[:200]

@@ -12,6 +12,7 @@ import json
 from . import acting as acting_mod
 from . import context_budget as budget_mod
 from . import emotion_events as emotion_mod
+from . import judge as judge_mod
 from . import recall as recall_mod
 import importlib
 import re
@@ -1124,7 +1125,30 @@ class StorytellerPlugin(Star):
             描述 = 上文的景象主题（如「你那边的云怎么样」→「云」）；
         B（实验开关）：上述未命中且含弱信号时调轻量 LLM 仲裁；未配置/超时=不拦截。
         """
+        # 0.260（R6）：**LLM 优先**。规则只在 LLM 不可用时当兜底。
+        # 真机事故：规则把「你做一个文档」判成画图并直接 return，LLM 根本没被问到。
         desc = detect_image_intent(text)
+        try:
+            provider = self._judge_provider()
+            if provider is not None:
+                verdict = await judge_mod.IMAGE_KIND.judge(provider, text)
+                if verdict.value == "文档":
+                    logger.info("[Storyteller] 生图判定(LLM=%s): 文档请求，不生图", verdict.source)
+                    return "", ""
+                if verdict.value in ("其他",) and not desc:
+                    return "", ""
+                if verdict.value == "画图":
+                    # LLM 说要图：用规则抽出的描述；抽不出就用整句（让生图模型自己理解）
+                    if not desc:
+                        desc = str(text or "").strip()[:200]
+                    logger.info("[Storyteller] 生图判定(LLM=%s): 画图 -> %s", verdict.source, desc[:40])
+                elif verdict.source != "fallback":
+                    # LLM 说「其他」但规则抽出了描述 —— 以 LLM 为准
+                    logger.info("[Storyteller] 生图判定(LLM): 其他，不生图（规则曾判 %s）", desc[:30])
+                    return "", ""
+        except Exception as exc:
+            logger.debug("[Storyteller] 生图 LLM 判定失败（用规则兜底）: %s", exc)
+
         if desc:
             # 泛词描述 → 用上文主题锚定（0.182：「拍个照发我」在聊云时应画云，不画人像）
             if any(g in desc for g in self._IMAGE_GENERIC_DESC):
@@ -3628,6 +3652,21 @@ class StorytellerPlugin(Star):
         except Exception as exc:
             logger.debug("[Storyteller] 撤回失败（忽略）: %s", exc)
             return False
+
+    def _judge_provider(self) -> Any:
+        """给判定器用的 provider：可单独配（省钱），默认用当前模型。"""
+        try:
+            pid = str(self.config.get("judge.provider_id", "") or "").strip()
+            if pid:
+                got = self.context.get_provider_by_id(pid)
+                if got is not None:
+                    return got
+        except Exception:
+            pass
+        try:
+            return self.context.get_using_provider()
+        except Exception:
+            return None
 
     def _emotion_budget(self) -> Any:
         if getattr(self, "_emotion_budget_obj", None) is None:
