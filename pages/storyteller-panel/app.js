@@ -678,41 +678,54 @@ function applyAnimationSettings() {
 }
 
 async function render() {
+  // 0.265：渲染序号 + 立即清空，修「切了标签但内容还是旧页」的竞态。
+  // 根因是下面各页渲染并行不等待，旧页请求晚回来会覆盖新页内容。
+  const seq = (state.renderSeq = (Number(state.renderSeq) || 0) + 1);
   // 离开旧页面：停止该页的实时轮询（防抖页等）
   stopAllPolling();
   renderNav();
   const [title, sub] = TITLES[state.current] || TITLES.overview;
   document.title = `${title} · 为你续写的故事`;
+  const viewNow = $("#view");
+  if (viewNow) {
+    viewNow.innerHTML = '<div class="loading">切换中…</div>';
+  }
   try {
-    if (state.current === "overview") renderOverview();
-    if (state.current === "troubleshoot") renderTroubleshoot().catch((err) => diagLog(`清障页异常: ${err.message}`));
-    if (state.current === "models") renderModels().catch((err) => diagLog(`模型页异常: ${err.message}`));
-    if (state.current === "image") renderImage().catch((err) => diagLog(`生图页异常: ${err.message}`));
-    if (state.current === "appearance") renderAppearance();
+    if (state.current === "overview") await renderOverview();
+    if (state.current === "troubleshoot") await renderTroubleshoot().catch((err) => diagLog(`清障页异常: ${err.message}`));
+    if (state.current === "models") await renderModels().catch((err) => diagLog(`模型页异常: ${err.message}`));
+    if (state.current === "image") await renderImage().catch((err) => diagLog(`生图页异常: ${err.message}`));
+    if (state.current === "appearance") await renderAppearance();
     // 异步数据加载不阻塞切换动画：同步部分先填充占位，数据回来后再填充内容
-    if (state.current === "intercept") renderIntercept().catch((err) => diagLog(`拦＆改页异常: ${err.message}`));
-    if (state.current === "silence") renderSilence().catch((err) => diagLog(`沉默页异常: ${err.message}`));
-    if (state.current === "rewrite") renderRewrite().catch((err) => diagLog(`润色页异常: ${err.message}`));
-    if (state.current === "debounce") renderDebounce().catch((err) => diagLog(`防抖页异常: ${err.message}`));
-    if (state.current === "identity") renderIdentity().catch((err) => diagLog(`身份页异常: ${err.message}`));
-    if (state.current === "relationship") renderRelationships().catch((err) => diagLog(`关系页异常: ${err.message}`));
-    if (state.current === "voice") renderVoice().catch((err) => diagLog(`风格页异常: ${err.message}`));
-    if (state.current === "persona") renderPersona().catch((err) => diagLog(`人格页异常: ${err.message}`));
-    if (state.current === "presence") renderPresence().catch((err) => diagLog(`状态页异常: ${err.message}`));
-    if (state.current === "schedule") renderSchedule().catch((err) => diagLog(`日程页异常: ${err.message}`));
-    if (state.current === "wardrobe") renderWardrobe().catch((err) => diagLog(`穿搭页异常: ${err.message}`));
-    if (state.current === "mindstream") renderMindstream().catch((err) => diagLog(`思绪页异常: ${err.message}`));
-    if (state.current === "mind") renderMind().catch((err) => diagLog(`内心页异常: ${err.message}`));
-    if (state.current === "memory") renderMemory().catch((err) => diagLog(`记忆页异常: ${err.message}`));
-    if (state.current === "proactive") renderProactive().catch((err) => diagLog(`主动页异常: ${err.message}`));
-    if (state.current === "send") renderSend().catch((err) => diagLog(`发送页异常: ${err.message}`));
-    if (state.current === "emoji") renderEmoji().catch((err) => diagLog(`表情包页异常: ${err.message}`));
-    if (state.current === "token") renderToken().catch((err) => diagLog(`Token页异常: ${err.message}`));
-    if (state.current === "settings") renderSettings().catch((err) => diagLog(`设置页异常: ${err.message}`));
-    if (state.current === "acting") renderActing().then(bindActingEditors).catch((err) => diagLog(`守则页异常: ${err.message}`));
-    if (state.current === "judge") renderJudge().catch((err) => diagLog(`判定页异常: ${err.message}`));
-    if (state.current === "debug") renderDebug().catch((err) => diagLog(`调试页异常: ${err.message}`));
-    if (state.current === "thanks") renderThanks();
+    if (state.current === "intercept") await renderIntercept().catch((err) => diagLog(`拦＆改页异常: ${err.message}`));
+    if (state.current === "silence") await renderSilence().catch((err) => diagLog(`沉默页异常: ${err.message}`));
+    if (state.current === "rewrite") await renderRewrite().catch((err) => diagLog(`润色页异常: ${err.message}`));
+    if (state.current === "debounce") await renderDebounce().catch((err) => diagLog(`防抖页异常: ${err.message}`));
+    if (state.current === "identity") await renderIdentity().catch((err) => diagLog(`身份页异常: ${err.message}`));
+    if (state.current === "relationship") await renderRelationships().catch((err) => diagLog(`关系页异常: ${err.message}`));
+    if (state.current === "voice") await renderVoice().catch((err) => diagLog(`风格页异常: ${err.message}`));
+    if (state.current === "persona") await renderPersona().catch((err) => diagLog(`人格页异常: ${err.message}`));
+    if (state.current === "presence") await renderPresence().catch((err) => diagLog(`状态页异常: ${err.message}`));
+    if (state.current === "schedule") await renderSchedule().catch((err) => diagLog(`日程页异常: ${err.message}`));
+    if (state.current === "wardrobe") await renderWardrobe().catch((err) => diagLog(`穿搭页异常: ${err.message}`));
+    if (state.current === "mindstream") await renderMindstream().catch((err) => diagLog(`思绪页异常: ${err.message}`));
+    if (state.current === "mind") await renderMind().catch((err) => diagLog(`内心页异常: ${err.message}`));
+    if (state.current === "memory") await renderMemory().catch((err) => diagLog(`记忆页异常: ${err.message}`));
+    if (state.current === "proactive") await renderProactive().catch((err) => diagLog(`主动页异常: ${err.message}`));
+    if (state.current === "send") await renderSend().catch((err) => diagLog(`发送页异常: ${err.message}`));
+    if (state.current === "emoji") await renderEmoji().catch((err) => diagLog(`表情包页异常: ${err.message}`));
+    if (state.current === "token") await renderToken().catch((err) => diagLog(`Token页异常: ${err.message}`));
+    if (state.current === "settings") await renderSettings().catch((err) => diagLog(`设置页异常: ${err.message}`));
+    if (state.current === "acting") await renderActing().then(bindActingEditors).catch((err) => diagLog(`守则页异常: ${err.message}`));
+    if (state.current === "judge") await renderJudge().catch((err) => diagLog(`判定页异常: ${err.message}`));
+    if (state.current === "debug") await renderDebug().catch((err) => diagLog(`调试页异常: ${err.message}`));
+    if (state.current === "thanks") await renderThanks();
+    // 过期校验：渲染期间如果又切了标签，重新渲染当前页，保证最终显示正确
+    if (seq !== state.renderSeq) {
+      diagLog(`渲染序号过期（${seq} → ${state.renderSeq}），重渲染当前页`);
+      render();
+      return;
+    }
   } catch (err) {
     diagLog(`页面渲染异常: ${err.message}`);
     const view = $("#view");
@@ -3100,7 +3113,7 @@ async function renderMemory() {
       testBtn.disabled = true;
       testBtn.textContent = "检测中…";
       apiGet("memory").then((d) => {
-        if (state.current === "memory") renderMemory();
+        if (state.current === "memory") await renderMemory();
       }).catch(() => {
         testBtn.disabled = false;
         testBtn.textContent = "检测失败，重试";
