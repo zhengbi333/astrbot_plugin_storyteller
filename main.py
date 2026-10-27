@@ -231,23 +231,14 @@ def _looks_asking_context(text: str) -> bool:
 # 0.241：外部工具（AstrBot 主链 / MCP / 其它插件注册的工具）在 tool loop 里的标记前缀
 _EXT_TOOL_PREFIX = "ext:"
 # 0.242：外部工具描述的缓存有效期（秒）。MCP 热插拔最迟在这之后生效。
-# 群聊里**不给**的工具：会改磁盘 / 执行代码 / 启动后台任务 / 把工作区内容发出去。
-# 群聊里任何群友都能说话，这些能力不该出现在她的工具列表里。
-_GROUP_BLOCKED_TOOLS = frozenset({
-    "toolbox_fs_write",
-    "toolbox_edit",
-    "toolbox_doc_write",
-    "toolbox_doc_export",
-    "toolbox_python",
-    "toolbox_shell_run",
-    "toolbox_download",
-    "toolbox_task_start",
-    "toolbox_delegate",
-    "toolbox_parallel",
-    "toolbox_archive",
-    "toolbox_learn",
-    "toolbox_send_file",
-})
+# 群聊里默认禁用的工具（改配置 capabilities.group_blocked_tools 即可调整）。
+# 这里只作为“配置缺失/读不到”时的兜底，**不再硬编码为唯一真相** ——
+# 我们插件的原则是：一切开关在 _conf_schema.json 里，面板可改。
+_GROUP_BLOCKED_DEFAULT = (
+    "toolbox_fs_write,toolbox_edit,toolbox_doc_write,toolbox_doc_export,"
+    "toolbox_python,toolbox_shell_run,toolbox_download,toolbox_task_start,"
+    "toolbox_delegate,toolbox_parallel,toolbox_archive,toolbox_learn,toolbox_send_file"
+)
 
 _EXT_TOOL_CACHE_TTL = 20.0
 
@@ -3298,9 +3289,11 @@ class StorytellerPlugin(Star):
         if not self._astrbot_tools_enabled():
             return [], set()
         allow = self._astrbot_tool_allowlist()
+        # 群聊禁用清单：读配置（不写死），并在下面进缓存键
+        blocked = self._group_blocked_tools() if is_group else frozenset()
         # 关键：is_group 必须进缓存键。否则私聊先调一次后，群聊会命中私聊的缓存
         # （含写工具），群聊隔离就白做了。
-        key = (True, bool(is_group), tuple(sorted(allow)))
+        key = (True, bool(is_group), tuple(sorted(allow)), tuple(sorted(blocked)))
         now = time.monotonic()
         cache = getattr(self, "_ext_tool_cache", None)
         if cache and cache[1] == key and (now - cache[0]) < _EXT_TOOL_CACHE_TTL:
@@ -3324,7 +3317,7 @@ class StorytellerPlugin(Star):
                 continue
             if allow and name not in allow:
                 continue
-            if is_group and name in _GROUP_BLOCKED_TOOLS:
+            if is_group and name in blocked:
                 continue
             schemas.append(item)
             names.add(name)
@@ -3332,6 +3325,20 @@ class StorytellerPlugin(Star):
         if names:
             logger.info("[Storyteller] 外部工具已就绪: %s", sorted(names))
         return schemas, names
+
+    def _group_blocked_tools(self) -> frozenset[str]:
+        """群聊禁用的工具集（读配置，配置缺失时用内置默认）。"""
+        try:
+            raw = str(self.config.get("capabilities.group_blocked_tools", "") or "")
+        except Exception:
+            raw = ""
+        if not raw.strip():
+            if self.config.bool("capabilities.group_blocked_tools_fallback", True):
+                raw = _GROUP_BLOCKED_DEFAULT
+            else:
+                return frozenset()
+        parts = raw.replace("，", ",").replace(";", ",").split(",")
+        return frozenset(p.strip() for p in parts if p.strip())
 
     def _is_group_event(self, event: Any = None) -> bool:
         """判断这条消息是不是群聊。认不出就按群聊处理（宁严勿松）。"""
@@ -3364,7 +3371,7 @@ class StorytellerPlugin(Star):
         if not self._astrbot_tools_enabled():
             return {"ok": False, "status": "disabled", "message": "外部工具开关没开"}
         # 群聊硬拦：工具列表里本就不该出现；若模型凭记忆硬调，也不执行
-        if name in _GROUP_BLOCKED_TOOLS and self._is_group_event(event):
+        if name in self._group_blocked_tools() and self._is_group_event(event):
             logger.info("[Storyteller] 群聊拦截写类工具: %s", name)
             return {
                 "ok": False,

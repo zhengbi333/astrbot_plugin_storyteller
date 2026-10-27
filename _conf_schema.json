@@ -1413,6 +1413,12 @@
         "type": "int",
         "default": 0,
         "hint": "每天最多做几次待办操作（加/完成/列，0=不限）。"
+      },
+      "group_blocked_tools": {
+        "description": "群聊里禁用的工具",
+        "type": "string",
+        "default": "toolbox_fs_write,toolbox_edit,toolbox_doc_write,toolbox_doc_export,toolbox_python,toolbox_shell_run,toolbox_download,toolbox_task_start,toolbox_delegate,toolbox_parallel,toolbox_archive,toolbox_learn,toolbox_send_file",
+        "hint": "逗号分隔。群聊里这些工具**不会出现在她的工具列表里**（不是拒绝调用，是根本不给）。默认挡住所有会改磁盘/执行代码/发工作区文件的工具（13 项）。留空 = 群聊与私聊能力相同（不建议）。只读工具（fs_read/fs_list/web_*）建议保留。"
       }
     }
   },
