@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 MAX_RULE_CHARS = 1200
-DEFAULT_SECTION_ORDER = ("warmth", "length", "tone", "identity", "reference", "closing", "format")
+DEFAULT_SECTION_ORDER = ("warmth", "length", "tone", "identity", "reference", "closing", "format", "tooling")
 
 # 机制性约束：与性格无关，任何人格都必须遵守
 MECHANICAL_RULES: list[str] = [
@@ -177,12 +177,15 @@ def load_rules(plugin: Any) -> Rules:
             body = body[:MAX_RULE_CHARS].rstrip() + "\n…（这一节太长，已截断）"
         sections[path.stem] = body
 
-    missing = [name for name in DEFAULT_RULES if name not in sections]
+    # 缺的分节用默认补上：删掉某个 .md 文件的意思是「这一节回到默认」，
+    # 而不是「这一节消失」。真想关掉请用 acting.sec_<名字>。
+    missing: list[str] = []
+    for name, body in DEFAULT_RULES.items():
+        if name not in sections:
+            sections[name] = body
+            missing.append(name)
     rules = Rules(sections=sections, source_dir=str(directory),
                   from_files=from_files, missing=missing)
-    if not sections:
-        rules.sections = dict(DEFAULT_RULES)
-        rules.missing = []
     return rules
 
 
