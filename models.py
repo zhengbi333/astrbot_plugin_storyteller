@@ -410,8 +410,15 @@ async def chat_with_tools(
         ordered.append(slot)
     try:
         result.tool_calls = ordered
-    except Exception:
-        pass
+    except Exception as exc:
+        # 0.269：这里原来静默 pass，等于「模型要调工具，但我们把调用丢了」——
+        # 真机表现就是「她收到了工具却一次都没调」。至少要让工程师看得见。
+        try:
+            from .main import _diag as _plug_diag
+
+            _plug_diag(f"tool_calls 写入失败（工具调用会丢失）: {type(exc).__name__}: {exc}")
+        except Exception:
+            pass
     return result
 
 

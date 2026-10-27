@@ -4,6 +4,12 @@
 
 
 
+
+## alpha-0.269（当前）
+
+- ① `models.py`：tool_calls 写入失败被静默吞掉
+- 详见 [changelogs/alpha-0.269.md](changelogs/alpha-0.269.md)。
+
 ## alpha-0.268（当前）
 
 - **修「守则/判定页一直切换中」**：这两个渲染函数写成 `return html`，但本面板的既有约定是函数内部自己写 `view.innerHTML`，调用处又不接收返回值 → HTML 被丢弃，页面只剩开头那句「切换中…」。现在两个函数都会写入 DOM，空状态出口也补了写入。

@@ -250,8 +250,15 @@ class ReplyBufferManager:
                 elif seg["type"] == "emoji":
                     try:
                         chain.file_image(seg["path"])
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # 0.269：图挂了但文字照发，这是对的；但不能连痕迹都没有 ——
+                        # 用户会看到「她说发了表情」却什么都没收到。
+                        try:
+                            from .main import _diag as _plug_diag
+
+                            _plug_diag(f"表情包挂载失败 {seg.get('path')}: {type(exc).__name__}: {exc}")
+                        except Exception:
+                            pass
             await sender(session_id, chain)
             # 0.194：记录「已真正发出」的内容——抢话作废重理解时要把它们作为上下文并入，避免空档
             try:
