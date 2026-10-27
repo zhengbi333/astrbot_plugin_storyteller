@@ -442,6 +442,28 @@ class StorytellerPlugin(Star):
                     pass
             self._touch_relationship(event)
             self._observe_message(event)
+            # 0.253：情绪事件挂在这里 —— on_message_observe 是**所有**消息都会过的入口，
+            # 而接管链路（直连生成）不走 AstrBot 的 on_llm_request，挂那儿等于没挂。
+            # 真机验证就是这样发现 last_event 一直是 None 的。
+            try:
+                if self.config.bool("emotion.enabled", True):
+                    import astrbot.api.message_components as _mc
+                    _text = ""
+                    try:
+                        _text = str(event.message_str or "").strip()
+                    except Exception:
+                        _text = ""
+                    if _text:
+                        _who = ""
+                        try:
+                            _who = str(event.get_sender_id() or "")
+                        except Exception:
+                            _who = ""
+                        self._apply_emotion_event(event, _text, user=_who)
+                        if self.config.bool("emotion.use_llm", False):
+                            asyncio.create_task(self._apply_emotion_event_llm(event, _text))
+            except Exception as _emo_exc:
+                logger.debug("[Storyteller] 情绪事件（观察层）失败（忽略）: %s", _emo_exc)
         except Exception as exc:
             logger.warning("[Storyteller] 消息观察异常: %s", exc)
 

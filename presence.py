@@ -188,7 +188,7 @@ def _compose_time_bg(now: str, schedule: dict[str, Any] | None) -> str:
     if 23 <= hour or hour < 5:
         base = "夜深了，不自觉地轻和缓一点"
     elif hour < 9:
-        base = "刚缓过来，话还不太多"
+        base = "刚缓过来，还在醒神"
     elif hour < 18:
         base = "普通白天的清醒感"
     else:
@@ -200,7 +200,9 @@ def _compose_time_bg(now: str, schedule: dict[str, Any] | None) -> str:
 
             act = current_activity(schedule, hhmm[11:16])
             if act:
-                upcoming = f"；待会儿还有安排（{act[:40]}），先收着点"
+                # 0.253：原来写「先收着点」——这句直接让她对谁都没兴致（真机就是「笑不出来」）。
+                # 改成中性叙述：有事归有事，不代表要冷淡。
+                upcoming = f"；待会儿有安排（{act[:40]}），心里记着这件事"
         except Exception:
             upcoming = ""
     return base + upcoming

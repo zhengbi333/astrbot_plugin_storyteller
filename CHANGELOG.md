@@ -2,7 +2,12 @@
 
 完整按版本日志见 [changelogs/](changelogs/) 目录。
 
-## alpha-0.252（当前）
+## alpha-0.253（当前）
+
+- **真机三修**：①情绪事件从 `on_llm_request` 改挂 `on_message_observe`（接管链路不走前者，真机实测 `last_event` 一直是 None）；②`mood` 删掉「先收着点」这类让她敷衍的描述；③补三张示例人格卡（不默认启用）—— 此前 `roles/` 目录不存在，她用的是默认 assistant 人格。
+- 新用例 `audit_81` **13/13**。详见 [changelogs/alpha-0.253.md](changelogs/alpha-0.253.md)。
+
+## alpha-0.252
 
 - **修图文割裂**：真机查到根因是 `debounce.window=2.0` 在「打字 3 秒 + 发表情 4 秒」的节奏里结算两次，图片落到第二个窗口单独触发回复。现在**纯媒体消息紧跟在上一条之后（默认 12 秒内）视为补充、静默吞掉**，不再单独回一句。开关 `debounce.media_followup_merge` / `media_followup_seconds`。
 - 新用例 `audit_79` **18/18**。详见 [changelogs/alpha-0.252.md](changelogs/alpha-0.252.md)。
