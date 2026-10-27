@@ -480,7 +480,7 @@ class StorytellerPlugin(Star):
                             _who = str(event.get_sender_id() or "")
                         except Exception:
                             _who = ""
-                        self._apply_emotion_event(event, _text, user=_who)
+                        await self._apply_emotion_event(event, _text, user=_who)
                         if self.config.bool("emotion.use_llm", False):
                             asyncio.create_task(self._apply_emotion_event_llm(event, _text))
             except Exception as _emo_exc:
@@ -499,7 +499,7 @@ class StorytellerPlugin(Star):
         except Exception as exc:
             logger.warning("[Storyteller] 消息观察异常: %s", exc)
 
-    def _detect_emoji_preference(self, event: AstrMessageEvent, text: str) -> None:
+    async def _detect_emoji_preference(self, event: AstrMessageEvent, text: str) -> None:
         """表情包显式偏好 + 反馈学习：明说「别发表情包」→ opt-out；「可以发」→ opt-in。
 
         反馈学习（轻量）：上一条回复刚带过表情包（近 30 分钟内）且用户现在说正面/负面词
@@ -519,6 +519,18 @@ class StorytellerPlugin(Star):
         if not user:
             return
         compact = re.sub(r"\s+", "", text)
+        # R6：先问 LLM「对方对发表情是什么态度」，关键词只作兜底。
+        #  为什么必须 LLM：「能不能别老发这些」这种绕的说法，关键词认不出来。
+        try:
+            _prov = judge_mod.EMOJI_PREF.resolve_provider(self)
+            if _prov is not None:
+                _got = await judge_mod.EMOJI_PREF.judge(_prov, text)
+                if _got.source != "fallback" and _got.value in ("少发", "多发"):
+                    self.emoji.update_preference("off" if _got.value == "少发" else "on")
+                    logger.info("[Storyteller] 表情偏好(LLM)：%s", "减少" if _got.value == "少发" else "允许")
+                    return
+        except Exception as exc:
+            logger.debug("[Storyteller] 表情偏好 LLM 失败（用关键词）: %s", exc)
         opt_out_words = ("别发表情", "不要发表情", "不用表情", "别老发图", "别发图", "别发图片", "别用表情")
         opt_in_words = ("可以发表情", "可以发图", "可以发图片", "恢复表情", "能用表情", "可以发表情包")
         try:
@@ -721,7 +733,23 @@ class StorytellerPlugin(Star):
             if self.config.bool("recall.enabled", False):
                 _session = str(getattr(event, "unified_msg_origin", "") or "")
                 _text = str(getattr(req, "prompt", "") or "")
-                _pending = recall_mod.plan(_session, _text, self.recall_book)
+                # R6：先问 LLM「对方是不是在纠正我」，关键词只作兜底
+                _pending = None
+                try:
+                    _prov = judge_mod.RECALL_NEED.resolve_provider(self)
+                    if _prov is not None:
+                        _got = await judge_mod.RECALL_NEED.judge(_prov, _text)
+                        if _got.value == "要撤回":
+                            _record = self.recall_book.peek(_session)
+                            if _record is not None and not _record.expired():
+                                _pending = _record
+                            elif _record is not None:
+                                self.recall_book.take(_session)
+                        elif _got.source != "fallback":
+                            _pending = None
+                except Exception as _rc_llm:
+                    logger.debug("[Storyteller] 撤回 LLM 判定失败（用规则）: %s", _rc_llm)
+                    _pending = recall_mod.plan(_session, _text, self.recall_book)
                 if _pending is not None:
                     self.recall_book.take(_session)
                     asyncio.create_task(self._do_recall(event, _pending.message_id))
@@ -735,7 +763,7 @@ class StorytellerPlugin(Star):
                     _who = str(event.get_sender_id() or "")
                 except Exception:
                     _who = ""
-                self._apply_emotion_event(event, _raw, user=_who)
+                await self._apply_emotion_event(event, _raw, user=_who)
                 if self.config.bool("emotion.use_llm", False):
                     asyncio.create_task(self._apply_emotion_event_llm(event, _raw))
         except Exception as _emo_exc:
@@ -1308,10 +1336,25 @@ class StorytellerPlugin(Star):
         if not self.config.bool("search.conversation_enabled", True):
             return False
         text = str(text or "")
-        if not self._SEARCH_INTENT_RE.search(text):
-            return False
-        if any(w in text for w in self._SEARCH_NON_WEB):
-            # 查日程/查消息/查文件等本地信息 → 不算网页搜索意图
+        # R6：先问 LLM「这句要不要联网查」，关键词只作兜底。
+        #  为什么必须 LLM：中文里「查一下日程」「查查这个资料」和「5090 现在多少钱」
+        #  长得一样，规则分不清本地查询和联网查询，会把日程当成搜索去搜网页。
+        _need_search = None
+        try:
+            _prov = judge_mod.SEARCH_NEED.resolve_provider(self)
+            if _prov is not None:
+                _got = await judge_mod.SEARCH_NEED.judge(_prov, text)
+                if _got.source != "fallback":
+                    _need_search = _got.value == "要查"
+        except Exception as _ss_exc:
+            logger.debug("[Storyteller] 搜索意图 LLM 判定失败（用关键词）: %s", _ss_exc)
+        if _need_search is None:
+            if not self._SEARCH_INTENT_RE.search(text):
+                return False
+            if any(w in text for w in self._SEARCH_NON_WEB):
+                # 查日程/查消息/查文件等本地信息 → 不算网页搜索意图
+                return False
+        elif _need_search is False:
             return False
         session_id = str(getattr(event, "unified_msg_origin", "") or "")
         if not session_id:
@@ -3627,7 +3670,7 @@ class StorytellerPlugin(Star):
             settled = 0
             if str(kind) in ("doc_write", "doc_export", "send_file", "learn", "download"):
                 try:
-                    settled = self._settle_promises_for_action(str(text or ""))
+                    settled = await self._settle_promises_for_action(str(text or ""))
                 except Exception as exc:
                     logger.debug("[Storyteller] 约定结算失败（忽略）: %s", exc)
             return {
@@ -3676,9 +3719,33 @@ class StorytellerPlugin(Star):
             )
         return self._emotion_budget_obj
 
-    def _apply_emotion_event(self, event: Any, text: str, *, user: str = "") -> str:
-        """关键词秒判情绪事件并写入 presence（同步、零延迟）。返回事件名。"""
+    async def _apply_emotion_event(self, event: Any, text: str, *, user: str = "") -> str:
+        """情绪事件：**LLM 优先**，关键词只当兜底（R6）。
+
+        为什么这个判定必须用 LLM：关键词表永远认不出"你一点都不讨厌""你可真会说话"
+        这类反讽，把好感判成恶意、把撒娇判成攻击，人设就崩了。
+        """
         try:
+            provider = judge_mod.EMOTION_EVENT.resolve_provider(self)
+            if provider is not None:
+                got = await judge_mod.EMOTION_EVENT.judge(provider, text)
+                if got.value == "普通":
+                    # LLM 说没情绪事件：不再跑关键词（避免误判反讽）
+                    if got.source != "fallback":
+                        return ""
+                elif got.value != "普通":
+                    verdict = emotion_mod.Verdict(
+                        event=got.value, intensity=0.7, source="llm",
+                        tone=emotion_mod.scale(got.value, 0.7)[0],
+                        tempo=emotion_mod.scale(got.value, 0.7)[1],
+                        battery=emotion_mod.scale(got.value, 0.7)[2],
+                    )
+                    presence = self.presence_store.load()
+                    emotion_mod.apply_to_presence(presence, verdict)
+                    self.presence_store.save(presence)
+                    logger.warning("[Storyteller] 情绪事件(LLM): %s（%s）", verdict.describe(), user or "-")
+                    return verdict.event
+            # 兜底：关键词
             verdict = emotion_mod.judge_keywords_only(text)
             if not verdict.is_event:
                 return ""
@@ -3725,8 +3792,11 @@ class StorytellerPlugin(Star):
         self, bridge: Any, content: str, session_context: Any, *, threshold: float = 0.6,
     ) -> bool:
         """查最近记忆里有没有内容高度相近的条目（**含认知写的**），避免同一件事写两条。"""
-        grams = _bigrams(content)
-        if len(grams) < 4:
+        # R6：先让 LLM 判「是不是同一件事」，二元组相似度只作兜底。
+        #  为什么必须 LLM：中文换个说法就巨变（"做了 PPT" vs "做了个幻灯片"），
+        #  字面相似度抓不住，会把同一件事记成两条。
+        text = str(content or "").strip()
+        if len(text) < 4:
             return False
         try:
             lister = getattr(bridge, "list_recent_memories", None)
@@ -3735,19 +3805,36 @@ class StorytellerPlugin(Star):
             records = lister(session_context=session_context, limit=12) or []
         except Exception:
             return False
+        provider = judge_mod.MEMORY_DUP.resolve_provider(self)
         for record in records:
             if isinstance(record, dict):
-                text = str(record.get("content") or record.get("summary") or "")
+                other = str(record.get("content") or record.get("summary") or "")
             else:
-                text = str(getattr(record, "content", "") or getattr(record, "summary", ""))
-            if not text:
+                other = str(getattr(record, "content", "") or getattr(record, "summary", ""))
+            if not other:
                 continue
-            if _similarity(grams, _bigrams(text)) >= threshold:
+            # LLM 优先：把两条一起给它判
+            if provider is not None:
+                try:
+                    got = await judge_mod.MEMORY_DUP.judge(
+                        provider, f"记忆A：{text}\n记忆B：{other}"
+                    )
+                    if got.value == "重复" and got.source != "fallback":
+                        logger.info("[Storyteller] 记忆去重(LLM)：已有相近条目，跳过写入")
+                        return True
+                    if got.source != "fallback":
+                        continue
+                except Exception as exc:
+                    logger.debug("[Storyteller] 去重 LLM 判定失败（用相似度）: %s", exc)
+            grams = _bigrams(text)
+            if len(grams) < 4:
+                continue
+            if _similarity(grams, _bigrams(other)) >= threshold:
                 logger.info("[Storyteller] 记忆去重：已有相近条目，跳过写入")
                 return True
         return False
 
-    def _settle_promises_for_action(self, action_text: str) -> int:
+    async def _settle_promises_for_action(self, action_text: str) -> int:
         """把"我刚做完的事"与挂着未结算的约定对齐，命中就标记结算。
 
         匹配方式：取约定文本与行动文本的**共同二字片段**（中文没有空格，字符二元组足够区分），
@@ -3764,6 +3851,7 @@ class StorytellerPlugin(Star):
         engine = getattr(self, "_inspiration_engine", None)
         if engine is None:
             return 0
+        provider = judge_mod.PROMISE_SETTLE.resolve_provider(self)
         settled = 0
         try:
             items = self._recent_promise_items(limit=12)
@@ -3779,9 +3867,25 @@ class StorytellerPlugin(Star):
                     continue
             except Exception:
                 continue
-            shared = action_grams & _bigrams(promise_text)
-            if len(shared) < 2:
-                continue
+            # R6：先让 LLM 判「这件行动有没有兑现这条约定」，二元组只作兜底。
+            #  为什么必须 LLM：约定和行动的中文表述往往完全不同
+            #  （约定「给你做份汇报」 vs 行动「生成了季度总结.pptx」），字面重合度很低。
+            _hit = None
+            if provider is not None:
+                try:
+                    got = await judge_mod.PROMISE_SETTLE.judge(
+                        provider, f"之前答应的：{promise_text}\n刚做的：{text}"
+                    )
+                    if got.source != "fallback":
+                        _hit = got.value == "兑现了"
+                    if _hit is False:
+                        continue
+                except Exception as exc:
+                    logger.debug("[Storyteller] 约定判定 LLM 失败（用相似度）: %s", exc)
+            if _hit is None:
+                shared = action_grams & _bigrams(promise_text)
+                if len(shared) < 2:
+                    continue
             try:
                 engine.mark_promise_settled(user, promise_text)
                 settled += 1
@@ -3934,7 +4038,8 @@ class StorytellerPlugin(Star):
         self._observe_media(event, text)
         # 表情包 opt-out / opt-in：用户明说「别发表情包」→ 关闭；「可以发表情」→ 重开
         try:
-            self._detect_emoji_preference(event, text)
+            # R6：偏好判定要问模型，所以放后台任务，不阻塞消息处理
+            asyncio.create_task(self._detect_emoji_preference(event, text))
         except Exception:
             pass
         # 0.151：用户夸奖 Bot 当前穿搭的衣物 → 标记重要（不会被一键置换清空）

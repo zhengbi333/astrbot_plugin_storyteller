@@ -26,6 +26,7 @@ const NAV = [
   { key: "emoji", label: "表情包" },
   { key: "token", label: "Token" },
   { key: "settings", label: "设置" },
+  { key: "judge", label: "判定" },
   { key: "debug", label: "调试" },
   { key: "thanks", label: "鸣谢" },
 ];
@@ -55,6 +56,7 @@ const TITLES = {
   emoji: ["表情包", "本地图库与分类"],
   token: ["Token 用量", "总 / 当天 / 当月 / 每模型"],
   settings: ["设置", "插件开关与界面偏好"],
+  judge: ["判定", "每个判定点用哪个模型、调了几次、退化成规则的比例（规矩 R6）"],
   debug: ["插件调试", "运行时日志与诊断"],
   thanks: ["鸣谢", "创作者与测试伙伴"],
 };
@@ -705,6 +707,7 @@ async function render() {
     if (state.current === "emoji") renderEmoji().catch((err) => diagLog(`表情包页异常: ${err.message}`));
     if (state.current === "token") renderToken().catch((err) => diagLog(`Token页异常: ${err.message}`));
     if (state.current === "settings") renderSettings().catch((err) => diagLog(`设置页异常: ${err.message}`));
+    if (state.current === "judge") renderJudge().catch((err) => diagLog(`判定页异常: ${err.message}`));
     if (state.current === "debug") renderDebug().catch((err) => diagLog(`调试页异常: ${err.message}`));
     if (state.current === "thanks") renderThanks();
   } catch (err) {
@@ -4322,6 +4325,43 @@ function bindSettingsEvents() {
 }
 
 /* 调试页：子选项卡（诊断 / 拦截与改换） */
+async function renderJudge() {
+  const data = await apiGet("judge/stats");
+  const rows = (data && data.judges) || [];
+  if (!rows.length) {
+    return '<div class="empty">没有判定器数据（judge.py 可能未加载）</div>';
+  }
+  const rate = data.fallback_rate == null ? 0 : Math.round(data.fallback_rate * 100);
+  let html = `<div class="grid">
+    <div class="cell"><div class="k">判定器</div><div class="v big">${rows.length}</div></div>
+    <div class="cell"><div class="k">LLM 判定次数</div><div class="v big accent">${data.total_llm}</div></div>
+    <div class="cell"><div class="k">退化成规则</div><div class="v big">${data.total_fallback}</div></div>
+    <div class="cell"><div class="k">退化率</div><div class="v big ${rate > 50 ? 'accent' : ''}">${rate}%</div></div>
+  </div>`;
+  html += '<div class="sect"><h3>每个判定</h3><div class="rule"></div></div>';
+  html += '<div class="list">';
+  for (const r of rows) {
+    const badge = r.configured
+      ? '<span class="tag ok">已单独配模型</span>'
+      : '<span class="tag">回退统一模型</span>';
+    html += `<div class="row">
+      <div class="id">${esc(r.name)}</div>
+      <div class="main">
+        <div class="t">${esc(r.options.join(' / '))}</div>
+        <div class="d">配置键：${esc(r.provider_key || '（未绑定）')} · 模型：${esc(r.model)}</div>
+      </div>
+      <div class="r">${badge}<br />LLM ${r.llm} · 缓存 ${r.cache} · 兜底 ${r.fallback}<br />剩余 ${r.left}/${r.limit}</div>
+    </div>`;
+  }
+  html += "</div>";
+  html += '<div class="sect"><h3>说明</h3><div class="rule"></div></div>';
+  html += `<div class="list"><div class="row"><div class="id">R6</div>
+    <div class="main"><div class="t">判定一律 LLM 优先，规则只当兜底</div>
+    <div class="d">「兜底」次数多 = 模型不可用或超时，那时会退回规则；「缓存」是不重复花钱的命中。</div></div>
+    </div></div>`;
+  return html;
+}
+
 async function renderDebug() {
   const view = $("#view");
   // 拦截内容已迁至「拦＆改」选项卡，调试页仅保留诊断

@@ -199,6 +199,7 @@ class StorytellerWebApi:
             (f"{prefix}/appearance/background", self.appearance_background_upload, ["POST"], "Storyteller background upload"),
             (f"{prefix}/appearance/background/select", self.appearance_background_select, ["POST"], "Storyteller background select"),
             (f"{prefix}/appearance/background/clear", self.appearance_background_clear, ["POST"], "Storyteller background clear"),
+            (f"{prefix}/judge/stats", self.judge_stats, ["GET"], "Storyteller judge stats"),
             (f"{prefix}/config/schema", self.config_schema, ["GET"], "Storyteller config schema"),
             (f"{prefix}/config/module/update", self.config_module_update, ["POST"], "Storyteller config module update"),
             (f"{prefix}/config/module/reset", self.config_module_reset, ["POST"], "Storyteller config module reset"),
@@ -332,6 +333,56 @@ class StorytellerWebApi:
                 "data_dir": str(self._plugin.data_dir),
             }
         )
+
+    # ------------------------------------------------------------- 判定（R6）
+
+    async def judge_stats(self) -> Any:
+        """判定器状态：每个判定用哪个模型、调了几次、还剩多少额度。
+
+        规矩 R6 的落地体现 —— LLM 判定是「看不见的成本」，
+        面板必须能回答：哪些判定在花钱、哪些退化成规则、为什么。
+        """
+        try:
+            from . import judge as judge_mod
+
+            plugin = self._plugin
+            rows: list[dict[str, Any]] = []
+            for name, judge in sorted(judge_mod.ALL_JUDGES.items()):
+                provider_key = str(getattr(judge, "provider_key", "") or "")
+                model = ""
+                try:
+                    provider = judge.resolve_provider(plugin)
+                    model = str(getattr(getattr(provider, "meta", None), "model", "") or "")
+                except Exception:
+                    model = ""
+                configured = False
+                if provider_key:
+                    try:
+                        configured = bool(str(plugin.config.get(provider_key, "") or "").strip())
+                    except Exception:
+                        configured = False
+                rows.append({
+                    "name": name,
+                    "provider_key": provider_key,
+                    "configured": configured,
+                    "model": model or "（回退当前模型）",
+                    "llm": judge.stats["llm"],
+                    "cache": judge.stats["cache"],
+                    "fallback": judge.stats["fallback"],
+                    "left": judge.budget.left(),
+                    "limit": judge.budget.daily_limit,
+                    "options": list(judge.options),
+                })
+            total_llm = sum(r["llm"] for r in rows)
+            total_fb = sum(r["fallback"] for r in rows)
+            return await _ok({
+                "judges": rows,
+                "total_llm": total_llm,
+                "total_fallback": total_fb,
+                "fallback_rate": round(total_fb / max(1, total_llm + total_fb), 3),
+            })
+        except Exception as exc:
+            return await _fail(f"读取判定状态失败：{type(exc).__name__}: {exc}")
 
     # ------------------------------------------------------------- 外观
 
