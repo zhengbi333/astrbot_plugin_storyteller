@@ -3990,12 +3990,32 @@ class StorytellerPlugin(Star):
             if provider is not None:
                 try:
                     got = await judge_mod.MEMORY_DUP.judge(
-                        provider, f"记忆A：{text}\n记忆B：{other}"
+                        provider, f"旧记忆：{other}\n新说法：{text}"
                     )
-                    if got.value == "重复" and got.source != "fallback":
-                        logger.info("[Storyteller] 记忆去重(LLM)：已有相近条目，跳过写入")
-                        return True
                     if got.source != "fallback":
+                        if got.value == "重复":
+                            logger.info("[Storyteller] 记忆去重(LLM)：已有同一件事，跳过写入")
+                            return True
+                        if got.value == "冲突":
+                            # P1-9：旧的说「不吃辣」，新的说「现在能吃辣」——旧的要标成过时（不删）
+                            old_id = ""
+                            if isinstance(record, dict):
+                                old_id = str(record.get("id") or "")
+                            else:
+                                old_id = str(getattr(record, "id", "") or "")
+                            if old_id:
+                                try:
+                                    marker = getattr(bridge, "mark_superseded", None)
+                                    if callable(marker):
+                                        marker(old_id, "")
+                                        logger.info(
+                                            "[Storyteller] 记忆冲突：旧条目标为已被取代 id=%s", old_id[:12]
+                                        )
+                                except Exception as exc:
+                                    logger.debug("[Storyteller] 标记取代失败: %s", exc)
+                            if got.value == "冲突":
+                                continue   # 不跳过写入，让新的照常存进去
+                        # 补充 / 无关 → 都照常写入（补充的合并留到下一轮）
                         continue
                 except Exception as exc:
                     logger.debug("[Storyteller] 去重 LLM 判定失败（用相似度）: %s", exc)
