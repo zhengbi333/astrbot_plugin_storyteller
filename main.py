@@ -213,6 +213,24 @@ def _looks_asking_context(text: str) -> bool:
 # 0.241：外部工具（AstrBot 主链 / MCP / 其它插件注册的工具）在 tool loop 里的标记前缀
 _EXT_TOOL_PREFIX = "ext:"
 # 0.242：外部工具描述的缓存有效期（秒）。MCP 热插拔最迟在这之后生效。
+# 群聊里**不给**的工具：会改磁盘 / 执行代码 / 启动后台任务 / 把工作区内容发出去。
+# 群聊里任何群友都能说话，这些能力不该出现在她的工具列表里。
+_GROUP_BLOCKED_TOOLS = frozenset({
+    "toolbox_fs_write",
+    "toolbox_edit",
+    "toolbox_doc_write",
+    "toolbox_doc_export",
+    "toolbox_python",
+    "toolbox_shell_run",
+    "toolbox_download",
+    "toolbox_task_start",
+    "toolbox_delegate",
+    "toolbox_parallel",
+    "toolbox_archive",
+    "toolbox_learn",
+    "toolbox_send_file",
+})
+
 _EXT_TOOL_CACHE_TTL = 20.0
 
 
@@ -2601,7 +2619,9 @@ class StorytellerPlugin(Star):
                             _cap_tools = build_tool_schemas(self, "接管", exclude=caps_done(event))
                             # 0.241：并入 AstrBot 已激活工具（含 MCP 与其它插件），开关默认关
                             try:
-                                _cap_tools = list(_cap_tools) + self._astrbot_tool_schemas()
+                                _cap_tools = list(_cap_tools) + self._astrbot_tool_schemas(
+                            is_group=self._is_group_event(event)
+                        )
                             except Exception as _ext_exc:
                                 logger.warning("[Storyteller] 并入外部工具失败（忽略）: %s", _ext_exc)
                     except Exception as _texc:
@@ -3231,7 +3251,7 @@ class StorytellerPlugin(Star):
             logger.debug("[Storyteller] 取工具管理器失败: %s", exc)
         return None
 
-    def _astrbot_tool_bundle(self) -> tuple[list[dict], set[str]]:
+    def _astrbot_tool_bundle(self, is_group: bool = False) -> tuple[list[dict], set[str]]:
         """一次性给出（工具描述, 工具名集合），并做短时缓存。
 
         0.242：此前每次组装 tools、以及每轮 tool loop 都会重新问一遍 AstrBot 的工具集，
@@ -3241,7 +3261,9 @@ class StorytellerPlugin(Star):
         if not self._astrbot_tools_enabled():
             return [], set()
         allow = self._astrbot_tool_allowlist()
-        key = (True, tuple(sorted(allow)))
+        # 关键：is_group 必须进缓存键。否则私聊先调一次后，群聊会命中私聊的缓存
+        # （含写工具），群聊隔离就白做了。
+        key = (True, bool(is_group), tuple(sorted(allow)))
         now = time.monotonic()
         cache = getattr(self, "_ext_tool_cache", None)
         if cache and cache[1] == key and (now - cache[0]) < _EXT_TOOL_CACHE_TTL:
@@ -3265,6 +3287,8 @@ class StorytellerPlugin(Star):
                 continue
             if allow and name not in allow:
                 continue
+            if is_group and name in _GROUP_BLOCKED_TOOLS:
+                continue
             schemas.append(item)
             names.add(name)
         self._ext_tool_cache = (now, key, schemas, names)
@@ -3272,17 +3296,44 @@ class StorytellerPlugin(Star):
             logger.info("[Storyteller] 外部工具已就绪: %s", sorted(names))
         return schemas, names
 
-    def _astrbot_tool_schemas(self) -> list[dict]:
-        """把 AstrBot 已激活工具的描述并入 tools（受开关与白名单约束，带缓存）。"""
-        return self._astrbot_tool_bundle()[0]
+    def _is_group_event(self, event: Any = None) -> bool:
+        """判断这条消息是不是群聊。认不出就按群聊处理（宁严勿松）。"""
+        try:
+            if event is not None:
+                msg = getattr(event, "message_obj", None)
+                if msg is not None:
+                    if getattr(msg, "group", None) is not None:
+                        return True
+                    if str(getattr(msg, "group_id", "") or ""):
+                        return True
+                origin = str(getattr(event, "unified_msg_origin", "") or "")
+                if "Group" in origin:
+                    return True
+                if "Friend" in origin:
+                    return False
+        except Exception:
+            pass
+        return True
 
-    def _astrbot_tool_names(self) -> set[str]:
-        return set(self._astrbot_tool_bundle()[1])
+    def _astrbot_tool_schemas(self, is_group: bool = False) -> list[dict]:
+        """把 AstrBot 已激活工具的描述并入 tools（受开关、白名单、群聊隔离约束）。"""
+        return self._astrbot_tool_bundle(is_group)[0]
+
+    def _astrbot_tool_names(self, is_group: bool = False) -> set[str]:
+        return set(self._astrbot_tool_bundle(is_group)[1])
 
     async def _call_astrbot_tool(self, name: str, args: dict, event: Any) -> dict:
         """执行一个 AstrBot 工具（MCP / 其它插件 / 主链工具），返回统一结果字典。"""
         if not self._astrbot_tools_enabled():
             return {"ok": False, "status": "disabled", "message": "外部工具开关没开"}
+        # 群聊硬拦：工具列表里本就不该出现；若模型凭记忆硬调，也不执行
+        if name in _GROUP_BLOCKED_TOOLS and self._is_group_event(event):
+            logger.info("[Storyteller] 群聊拦截写类工具: %s", name)
+            return {
+                "ok": False,
+                "status": "blocked",
+                "message": "群聊里不能改文件或执行代码；需要的话请主人私聊我。",
+            }
         manager = self._astrbot_tool_manager()
         if manager is None:
             return {"ok": False, "status": "unavailable", "message": "拿不到 AstrBot 工具管理器"}

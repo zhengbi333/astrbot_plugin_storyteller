@@ -5,6 +5,15 @@
 
 
 
+
+## alpha-0.270（当前）
+
+- **P0-1 群聊工具隔离**：群聊里不再给 13 个写类工具（fs_write/edit/doc_write/python/shell_run/download/task_start/delegate/parallel/archive/learn/send_file），只保留只读（fs_read/fs_list/fs_search/web_*）。
+- **缓存键加入 is_group**（关键）：否则私聊先调一次后，群聊会命中私聊缓存，隔离白做。
+- **执行侧硬拦**：模型凭记忆硬调写工具也会返回 `blocked`。
+- `audit_87_group_isolation.py` **23/23**。
+- 详见 [changelogs/alpha-0.270.md](changelogs/alpha-0.270.md)。
+
 ## alpha-0.269（当前）
 
 - ① `models.py`：tool_calls 写入失败被静默吞掉
