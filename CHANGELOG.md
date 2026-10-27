@@ -6,6 +6,12 @@
 
 
 
+
+## alpha-0.271（当前）
+
+- P0-3 试运行（只演不发）
+- 详见 [changelogs/alpha-0.271.md](changelogs/alpha-0.271.md)。
+
 ## alpha-0.270（当前）
 
 - **P0-1 群聊工具隔离**：群聊里不再给 13 个写类工具（fs_write/edit/doc_write/python/shell_run/download/task_start/delegate/parallel/archive/learn/send_file），只保留只读（fs_read/fs_list/fs_search/web_*）。

@@ -91,6 +91,24 @@ _TOOL_USAGE_RULES = """【怎么用工具】
 - 做完之后用一句话说结果就行，不要把工具返回的原始内容整段贴出来。"""
 
 
+def _preview_chain(chain: Any, limit: int = 300) -> str:
+    """把 MessageChain 压成一行可读文本（试运行日志用）。"""
+    try:
+        parts: list[str] = []
+        for seg in list(getattr(chain, "chain", []) or []):
+            kind = type(seg).__name__
+            text = getattr(seg, "text", None)
+            if text:
+                parts.append(str(text))
+            else:
+                path = getattr(getattr(seg, "file", None), "name", None) or getattr(seg, "path", None)
+                parts.append(f"[{kind}:{str(path)[-40:] if path else '?'}]")
+        out = " | ".join(parts) or "（空）"
+        return out[:limit]
+    except Exception as exc:
+        return f"（预览失败：{type(exc).__name__}）"
+
+
 def _diag(message: str) -> None:
     """把关键链路事件写进数据目录的 _diag.log（工程师能直接读，不依赖 GUI 日志）。"""
     try:
@@ -1002,6 +1020,9 @@ class StorytellerPlugin(Star):
 
             chain = MessageChain()
             chain.message(str(text)[:200])
+            if self.simulation_on():
+                self._sim_note(str(getattr(event, "unified_msg_origin", "") or "?"), chain, "超时兜底")
+                return
             sender = getattr(event, "send", None)
             if callable(sender):
                 await sender(chain)
@@ -1095,6 +1116,10 @@ class StorytellerPlugin(Star):
             chain = MessageChain()
             chain.file_image(path)
             chain.message(caption)
+            if self.simulation_on():
+                self._sim_note(session_id, chain, "生图")
+                self._diag(f"[试运行] 图片已生成但未发送: {path[-60:]}")
+                return False  # 交回主链，让她照常回话（试运行不吞对话）
             sender = getattr(self.context, "send_message", None)
             if callable(sender) and session_id:
                 await sender(session_id, chain)
@@ -3230,6 +3255,18 @@ class StorytellerPlugin(Star):
             store = {}
             self._repeat_seen = store
         return store
+
+    def simulation_on(self) -> bool:
+        """试运行：全链路照跑，但不真的发到 QQ（只写 _diag.log）。"""
+        try:
+            return bool(self.config.bool("simulation.enabled", False))
+        except Exception:
+            return False
+
+    def _sim_note(self, target: str, chain: Any, reason: str = "") -> None:
+        """试运行时记录「本应发什么」。"""
+        tag = f"（{reason}）" if reason else ""
+        _diag(f"[试运行{tag}] 本应发到 {target}：{_preview_chain(chain)}")
 
     def _astrbot_tools_enabled(self) -> bool:
         try:

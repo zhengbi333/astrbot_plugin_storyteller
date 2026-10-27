@@ -230,6 +230,12 @@ class ReplyBufferManager:
             sender = getattr(self._plugin.context, "send_message", None)
             if not callable(sender) or not session_id:
                 return False
+            # 0.271 试运行：链路照跑，最后一步不真发（只写 _diag.log）
+            sim = False
+            try:
+                sim = bool(self._plugin.simulation_on())
+            except Exception:
+                sim = False
             chain = MessageChain()
             text = str(item.get("text") or "")[:400]
             # 表情包占位符渲染（同图去重：按分类避开近 N 天已发）
@@ -259,6 +265,13 @@ class ReplyBufferManager:
                             _plug_diag(f"表情包挂载失败 {seg.get('path')}: {type(exc).__name__}: {exc}")
                         except Exception:
                             pass
+            if sim:
+                try:
+                    self._plugin._sim_note(session_id, chain, "回复缓冲")
+                except Exception:
+                    pass
+                self._push_record(session_id, "sent", f"（试运行）{item['text'][:40]}")
+                return True
             await sender(session_id, chain)
             # 0.194：记录「已真正发出」的内容——抢话作废重理解时要把它们作为上下文并入，避免空档
             try:

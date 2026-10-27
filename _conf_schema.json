@@ -56,6 +56,18 @@
       }
     }
   },
+  "simulation": {
+    "description": "试运行（只演不发）",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "试运行模式",
+        "type": "bool",
+        "default": false,
+        "hint": "打开后：防抖、记忆、情绪、工具选择、生成全部照跑，但**最后一步不真的发到 QQ**，只在日志里写「本应发什么」。用来安全观察她会怎么回、会不会调工具。改完立刻生效。"
+      }
+    }
+  },
   "intercept": {
     "description": "拦截与改换",
     "type": "object",
