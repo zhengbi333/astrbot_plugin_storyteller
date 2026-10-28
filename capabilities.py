@@ -740,21 +740,6 @@ _register(Capability(
 ))
 
 _register(Capability(
-    name="poke",
-    title="戳一戳对方",
-    description=(
-        "戳对方一下（QQ 的「拍一拍」）。\n"
-        "**用**：对方很久没回话、你想引起注意、或者语气上想撒娇/催促时。\n"
-        "**不要用**：正经回答问题、或者在对方明显有事的时候反复戳。\n"
-        "戳完在文字里自然带一句（如「戳你」），别把它当成就代替了说话。"
-    ),
-    params={},
-    example='[DO:poke]{}',
-    daily_limit_key="capabilities.poke_daily",
-    impl=_impl_poke,
-))
-
-_register(Capability(
     name="emoji_send",
     title="发一张表情包",
     description=(

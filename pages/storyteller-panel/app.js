@@ -4697,11 +4697,16 @@ async function loadCapabilities() {
       .map((it) => {
         const limit = it.limit > 0 ? `${it.used_today}/${it.limit}` : it.used_today > 0 ? `${it.used_today}/不限` : "—";
         const full = it.limit > 0 && it.used_today >= it.limit;
+        const limitInput = `<input type="number" min="0" max="999" value="${it.limit > 0 ? it.limit : 0}"
+          data-cap-limit="${esc(it.daily_key || it.name + "_daily")}"
+          title="改每日上限，0 = 不限制"
+          style="width:56px;margin-left:6px;padding:2px 4px;font-size:12px;background:rgba(255,255,255,.06);color:inherit;border:1px solid rgba(255,255,255,.14);border-radius:4px" />`;
         return `<div style="padding:5px 0;border-bottom:1px dashed var(--line)">
           <div style="display:flex;align-items:baseline;gap:8px;white-space:nowrap;overflow:hidden">
             <span style="font-weight:600">${esc(it.title)}</span>
             <span style="opacity:.55;font-size:12px">${esc(it.name)}</span>
             <span style="margin-left:auto;font-size:12px;opacity:${full ? "1" : ".65"};color:${full ? "#ef4444" : "inherit"}">今日 ${esc(limit)}</span>
+            <span style="font-size:11px;opacity:.5">上限</span>${limitInput}
           </div>
           <div style="font-size:12px;opacity:.6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
                title="${esc(it.description)}${it.example ? " · 示例：" + esc(it.example) : ""}">${esc(it.description)}</div>

@@ -17,6 +17,12 @@
 
 
 
+
+## alpha-0.282（当前）
+
+- 移除 poke 能力（已迁到认知插件）
+- 详见 [changelogs/alpha-0.282.md](changelogs/alpha-0.282.md)。
+
 ## alpha-0.281（当前）
 
 - **改签名（`set_signature`）+ 名片赞（`like_contact`）**：都是 SnowLuma 动作，做成 capabilities 第 15/16 个能力（工具名 `story_set_signature` / `story_like_contact`）。签名 60 字上限、日限 2 次（对外可见，保守）；点赞次数夹紧 1~5、日限 5 次。
