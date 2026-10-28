@@ -20,6 +20,13 @@
 
 
 
+
+## alpha-0.285（当前）
+
+- **修能力页上限输入框（真缺口）**：上一轮只加渲染没加事件绑定，输入框能显示但改了没用。现在 change → `config/module/update` 写回 `capabilities`。这 12 个 `*_daily` 因为 `capabilities` 被排除在设置页外，**这个输入框是它们在面板上的唯一入口**。
+- 自查三件套：`audit_106`（41/41 面板数据）、`audit_107`（31/31 **用临时文件实测写入**）、`audit_108`（25/25 输入框）。
+- 详见 [changelogs/alpha-0.285.md](changelogs/alpha-0.285.md)。
+
 ## alpha-0.284（当前）
 
 - 三个动作能力已全部迁出

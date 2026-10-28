@@ -4844,8 +4844,30 @@ async function renderIntercept() {
   bindMasterSwitch("itc-enabled", "intercept", "enabled");
   const capRefresh = $("#cap-refresh");
   if (capRefresh) capRefresh.addEventListener("click", loadCapabilities);
-  loadCapabilities();
-  $("#itc-refresh").addEventListener("click", loadIntercept);
+  // 上限可改：change 时写回 capabilities 模块（0 = 不限制）
+  // 注意：capabilities 被 EXCLUDED_MODULES 排除在设置页外，这里是它在面板上的唯一入口。
+  document.querySelectorAll("[data-cap-limit]").forEach((el) => {
+    el.addEventListener("change", async () => {
+      const key = el.getAttribute("data-cap-limit");
+      const value = Math.max(0, Math.min(999, parseInt(el.value, 10) || 0));
+      el.disabled = true;
+      const old = el.style.borderColor;
+      try {
+        const res = await apiPost("config/module/update", { module: "capabilities", values: { [key]: value } });
+        if (res && res.error) throw new Error(res.error);
+        el.style.borderColor = "rgba(80,200,120,.7)";
+        setTimeout(() => { el.style.borderColor = old || "rgba(255,255,255,.14)"; }, 1200);
+        setTimeout(() => loadCapabilities(), 350);
+      } catch (err) {
+        el.style.borderColor = "rgba(239,68,68,.9)";
+        el.title = `改上限失败：${err.message}`;
+        diagLog(`改上限失败 ${key}: ${err.message}`);
+      } finally {
+        el.disabled = false;
+      }
+    });
+  });
+  loadCapabilities();  $("#itc-refresh").addEventListener("click", loadIntercept);
   $("#itc-clear").addEventListener("click", async () => {
     try {
       await apiPost("intercept/clear");
