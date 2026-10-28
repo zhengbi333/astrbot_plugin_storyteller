@@ -202,6 +202,47 @@ async def _impl_emoji_send(plugin: Any, event: Any, payload: dict) -> dict[str, 
             "next_hint": "文字照常自然说，表情包会随消息一起发出去。"}
 
 
+async def _impl_poke(plugin: Any, event: Any, payload: dict) -> dict[str, Any]:
+    """戳一戳对方（模型主动）。
+
+    SnowLuma 的 send_poke：私聊给 user_id，群聊给 group_id + user_id。
+    参数从事件里取，不用模型填 —— 模型只要决定"我要戳他"，不该猜 ID。
+    """
+    sender = ""
+    try:
+        sender = str(event.get_sender_id() or "").strip()
+    except Exception:
+        sender = ""
+    if not sender:
+        return {"ok": False, "status": "error", "message": "拿不到对方 ID，戳不了"}
+
+    # 群聊要带 group_id（否则会被当成好友戳）
+    group_id = ""
+    try:
+        group_id = str(event.get_group_id() or "").strip()
+    except Exception:
+        group_id = ""
+
+    bot = getattr(event, "bot", None)
+    caller = getattr(bot, "call_action", None)
+    if not callable(caller):
+        return {"ok": False, "status": "unavailable",
+                "message": "这个平台适配器不支持主动动作（call_action 不存在）",
+                "next_hint": "如实说戳不了，别声称戳了。"}
+
+    args: dict[str, Any] = {"user_id": int(sender) if sender.isdigit() else sender}
+    if group_id:
+        args["group_id"] = int(group_id) if group_id.isdigit() else group_id
+
+    try:
+        await caller("send_poke", **args)
+    except Exception as exc:
+        return {"ok": False, "status": "error", "message": f"戳一戳失败：{type(exc).__name__}: {exc}",
+                "next_hint": "如实说没戳成，别硬说戳到了。"}
+    return {"ok": True, "status": "ok", "action": "send_poke",
+            "message": "已戳对方一下"}
+
+
 async def _impl_photo_take(plugin: Any, event: Any, payload: dict) -> dict[str, Any]:
     """画/拍一张图并直接发给对方（模型主动）。"""
     desc = str(payload.get("prompt") or "").strip()
@@ -602,6 +643,21 @@ _register(Capability(
     daily_limit_key="capabilities.web_lookup_daily",
     readonly=True,
     impl=_impl_web_lookup,
+))
+
+_register(Capability(
+    name="poke",
+    title="戳一戳对方",
+    description=(
+        "戳对方一下（QQ 的「拍一拍」）。\n"
+        "**用**：对方很久没回话、你想引起注意、或者语气上想撒娇/催促时。\n"
+        "**不要用**：正经回答问题、或者在对方明显有事的时候反复戳。\n"
+        "戳完在文字里自然带一句（如「戳你」），别把它当成就代替了说话。"
+    ),
+    params={},
+    example='[DO:poke]{}',
+    daily_limit_key="capabilities.poke_daily",
+    impl=_impl_poke,
 ))
 
 _register(Capability(

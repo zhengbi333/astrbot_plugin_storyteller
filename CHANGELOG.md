@@ -15,6 +15,14 @@
 
 
 
+
+## alpha-0.280（当前）
+
+- **换成 SnowLuma 后的第一个动作：戳一戳（`send_poke`）**。做成 `capabilities` 第 14 个能力（工具名 `story_poke`），参数从事件取（模型不猜 ID）、群聊自动带 `group_id`、失败如实告知；日限 `capabilities.poke_daily` 默认 10。
+- 盘点：SnowLuma 共 **208 个动作**（get 70 / set 45 / send 15 / 说说 26 / 群管 74 / 表情 11 / 戳 3 / 赞 12）。
+- `audit_96_poke.py` **21/21**。
+- 详见 [changelogs/alpha-0.280.md](changelogs/alpha-0.280.md)。
+
 ## alpha-0.279（当前）
 
 - P1-10：面板显示「最近想起的记忆」
