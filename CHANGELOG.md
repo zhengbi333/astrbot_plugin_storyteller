@@ -18,6 +18,12 @@
 
 
 
+
+## alpha-0.283（当前）
+
+- 移除 set_signature 能力（已迁到认知插件）
+- 详见 [changelogs/alpha-0.283.md](changelogs/alpha-0.283.md)。
+
 ## alpha-0.282（当前）
 
 - 移除 poke 能力（已迁到认知插件）

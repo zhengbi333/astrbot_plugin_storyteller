@@ -710,21 +710,6 @@ _register(Capability(
 ))
 
 _register(Capability(
-    name="set_signature",
-    title="改自己的个性签名",
-    description=(
-        "改你 QQ 上的个性签名（对外可见，别人点开你资料能看到）。\n"
-        "**用**：心情明显变了、想留一句话、或者对方问「你签名怎么写这个」时。\n"
-        "**不要用**：每次聊天都改、或者写长句子（签名要短，像真人随手写的那种）。\n"
-        "改完在对话里自然提一句就行，别当作正式汇报。"
-    ),
-    params={"text": "新的签名文本，60 字以内，像真人随手写的"},
-    example='[DO:set_signature]{"text":"今天也在等消息"}',
-    daily_limit_key="capabilities.signature_daily",
-    impl=_impl_set_signature,
-))
-
-_register(Capability(
     name="like_contact",
     title="给对方的名片点赞",
     description=(
