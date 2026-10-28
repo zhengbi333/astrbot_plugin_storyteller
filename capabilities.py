@@ -202,6 +202,70 @@ async def _impl_emoji_send(plugin: Any, event: Any, payload: dict) -> dict[str, 
             "next_hint": "文字照常自然说，表情包会随消息一起发出去。"}
 
 
+async def _impl_set_signature(plugin: Any, event: Any, payload: dict) -> dict[str, Any]:
+    """改自己的 QQ 个性签名（对外可见，慎用）。
+
+    SnowLuma 的 set_self_longnick 参数是 {long_nick}，**必须是字符串**。
+    """
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return {"ok": False, "status": "error", "message": "签名文本不能为空"}
+    if len(text) > 60:
+        return {"ok": False, "status": "error",
+                "message": f"签名太长（{len(text)} 字），最多 60 字",
+                "next_hint": "改短一点再说。"}
+
+    bot = getattr(event, "bot", None)
+    caller = getattr(bot, "call_action", None)
+    if not callable(caller):
+        return {"ok": False, "status": "unavailable",
+                "message": "这个平台适配器不支持主动动作",
+                "next_hint": "如实说改不了，别声称改了。"}
+    try:
+        await caller("set_self_longnick", long_nick=text)
+    except Exception as exc:
+        return {"ok": False, "status": "error",
+                "message": f"改签名失败：{type(exc).__name__}: {exc}",
+                "next_hint": "如实说没改成。"}
+    return {"ok": True, "status": "ok", "action": "set_self_longnick",
+            "message": f"签名已改成「{text}」", "text": text}
+
+
+async def _impl_like_contact(plugin: Any, event: Any, payload: dict) -> dict[str, Any]:
+    """给对方的名片点个赞（QQ 的"名片赞"）。
+
+    SnowLuma 的 send_like 参数是 {user_id, times}。times 是次数，我夹在 1~5。
+    """
+    sender = ""
+    try:
+        sender = str(event.get_sender_id() or "").strip()
+    except Exception:
+        sender = ""
+    if not sender or not sender.isdigit():
+        return {"ok": False, "status": "error", "message": "拿不到对方 QQ 号，点不了赞"}
+
+    try:
+        times = int(payload.get("times") or 1)
+    except Exception:
+        times = 1
+    times = max(1, min(5, times))
+
+    bot = getattr(event, "bot", None)
+    caller = getattr(bot, "call_action", None)
+    if not callable(caller):
+        return {"ok": False, "status": "unavailable",
+                "message": "这个平台适配器不支持主动动作",
+                "next_hint": "如实说点不了，别声称点了。"}
+    try:
+        await caller("send_like", user_id=int(sender), times=times)
+    except Exception as exc:
+        return {"ok": False, "status": "error",
+                "message": f"点赞失败：{type(exc).__name__}: {exc}",
+                "next_hint": "如实说没点上。"}
+    return {"ok": True, "status": "ok", "action": "send_like",
+            "message": f"已经给你点了 {times} 个赞", "times": times}
+
+
 async def _impl_poke(plugin: Any, event: Any, payload: dict) -> dict[str, Any]:
     """戳一戳对方（模型主动）。
 
@@ -643,6 +707,36 @@ _register(Capability(
     daily_limit_key="capabilities.web_lookup_daily",
     readonly=True,
     impl=_impl_web_lookup,
+))
+
+_register(Capability(
+    name="set_signature",
+    title="改自己的个性签名",
+    description=(
+        "改你 QQ 上的个性签名（对外可见，别人点开你资料能看到）。\n"
+        "**用**：心情明显变了、想留一句话、或者对方问「你签名怎么写这个」时。\n"
+        "**不要用**：每次聊天都改、或者写长句子（签名要短，像真人随手写的那种）。\n"
+        "改完在对话里自然提一句就行，别当作正式汇报。"
+    ),
+    params={"text": "新的签名文本，60 字以内，像真人随手写的"},
+    example='[DO:set_signature]{"text":"今天也在等消息"}',
+    daily_limit_key="capabilities.signature_daily",
+    impl=_impl_set_signature,
+))
+
+_register(Capability(
+    name="like_contact",
+    title="给对方的名片点赞",
+    description=(
+        "给对方 QQ 名片点个赞（就是「名片赞」）。\n"
+        "**用**：对方帮了你、说了让你高兴的话、或者你想表达「我在意你」但不想直说时。\n"
+        "**不要用**：每天见面都点、或者对方刚说了不高兴的事。\n"
+        "这个动作很轻，通常不用专门说出来；说了反而显得刻意。"
+    ),
+    params={"times": "点赞次数，1~5，默认 1"},
+    example='[DO:like_contact]{"times":1}',
+    daily_limit_key="capabilities.like_daily",
+    impl=_impl_like_contact,
 ))
 
 _register(Capability(

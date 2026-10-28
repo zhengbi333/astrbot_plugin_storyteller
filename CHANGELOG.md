@@ -16,6 +16,14 @@
 
 
 
+
+## alpha-0.281（当前）
+
+- **改签名（`set_signature`）+ 名片赞（`like_contact`）**：都是 SnowLuma 动作，做成 capabilities 第 15/16 个能力（工具名 `story_set_signature` / `story_like_contact`）。签名 60 字上限、日限 2 次（对外可见，保守）；点赞次数夹紧 1~5、日限 5 次。
+- 配置项 `capabilities.signature_daily` / `capabilities.like_daily` 都带 hint，面板可改。
+- `audit_97_signature_like.py` **35/35**（含六种边界值与参数名验证）。
+- 详见 [changelogs/alpha-0.281.md](changelogs/alpha-0.281.md)。
+
 ## alpha-0.280（当前）
 
 - **换成 SnowLuma 后的第一个动作：戳一戳（`send_poke`）**。做成 `capabilities` 第 14 个能力（工具名 `story_poke`），参数从事件取（模型不猜 ID）、群聊自动带 `group_id`、失败如实告知；日限 `capabilities.poke_daily` 默认 10。
