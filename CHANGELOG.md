@@ -19,6 +19,12 @@
 
 
 
+
+## alpha-0.284（当前）
+
+- 三个动作能力已全部迁出
+- 详见 [changelogs/alpha-0.284.md](changelogs/alpha-0.284.md)。
+
 ## alpha-0.283（当前）
 
 - 移除 set_signature 能力（已迁到认知插件）
